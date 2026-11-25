@@ -4,8 +4,11 @@ build/
 *.app
 *.dSYM/
 *.bin
-.DS_Store
 __pycache__/
 *.pyc
 um790-fan/cli/um790fan
 um790-bench/build/
+!EFI/
+!EFI/**
+.DS_Store
+._*

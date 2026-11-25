@@ -49,6 +49,15 @@ Minisforum UM790 Pro Hackintosh 专项性能优化合集，聚焦 **AMD Zen 4 �
 - 原生 Metal/CPU 压测核心 [`src/metal_stress.m`](um790-bench/src/metal_stress.m) + 编排 CLI [`um790bench.py`](um790-bench/um790bench.py)。
 - 支持 `run`（全项基准 + `sysctl` 内核计数器审计 + Crash 监控）、`ab`（环境变量 A/B 对比）、`audit` 与 `compare`。
 
+### 4. `EFI/`（已脱敏的 OpenCore 引导配置）
+- 收录 UM790 Pro 实机验证通过的引导文件与精简后（仅保留当前启用项）的配置：
+  - **ACPI**：`SSDT-EC.aml`、`SSDT-USBX.aml`、`SSDT-CPUR.aml`
+  - **Drivers**：`PhxEdidOverride.efi`、`HfsPlus.efi`、`OpenRuntime.efi`、`ResetNvramEntry.efi`、`KernReserveLow.efi`
+  - **Kexts**（15 个启用项）：`Lilu`、`AMFIPass`、`VirtualSMC`、`AppleALC`、`AppleMCEReporterDisabler`、`BlueToolFixup`、`IntelBTPatcher`、`IntelBluetoothFirmware`、`NVMeFix`、`RestrictEvents`、`UTBMap`、`PhxBringup`、`AirportItlwm`、`RTL812xLucy`、`XhciNudge`
+- **隐私脱敏说明**：
+  - `PlatformInfo -> Generic` 中的 `SystemSerialNumber`、`MLB`、`SystemUUID`、`ROM` 均已替换为占位符；**使用 Apple 服务前请务必用 GenSMBIOS 重新生成 `MacBookPro16,1` 三码**。
+  - 已移除 `boot-args` 中的个人引导盘标识 `ocsrc=1401`（保留 `phx120=1` 等功能参数），并排除了未启用且含本地 `WiFiConfig` 凭据的 `itlwm.kext` 与所有 `.bak` 备份文件。
+
 ---
 
 ## 实测性能对比（UM790 Pro 实机数据）
