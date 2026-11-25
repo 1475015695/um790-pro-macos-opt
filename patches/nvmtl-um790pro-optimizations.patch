@@ -460,6 +460,123 @@ index 0948714..78a96e8 100644
      return s; }
  
  - (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)fn error:(NSError **)err {
+diff --git a/src/nmplugin/NVMTLLibraryLoad.m b/src/nmplugin/NVMTLLibraryLoad.m
+index 2cd6f6e..44f4497 100644
+--- a/src/nmplugin/NVMTLLibraryLoad.m
++++ b/src/nmplugin/NVMTLLibraryLoad.m
+@@ -850,6 +850,47 @@ static BOOL nvmtl_entry_of(NSString *ll, NSString **name, NSString **stage) {
+     }
+ }
+ 
++static NSString *nvmtl_air_strip_noop_asm(NSString *ll) {
++    if (!ll) return nil;
++    const char *src = ll.UTF8String;
++    if (!src || !strstr(src, "asm sideeffect \"\", \"\"()")) return ll;
++    const size_t slen = strlen(src);
++    char *dst = (char *)malloc(slen + 1);
++    if (!dst) return ll;
++    char *out = dst;
++    unsigned stripped = 0;
++    const char *p = src;
++    while (*p) {
++        const char *eol = strchr(p, '\n');
++        const size_t linelen = eol ? (size_t)(eol - p) : strlen(p);
++        const char *s = p;
++        size_t rem = linelen;
++        while (rem && (*s == ' ' || *s == '\t')) { s++; rem--; }
++        if (rem >= 5 && memcmp(s, "tail", 4) == 0 && (s[4] == ' ' || s[4] == '\t')) { s += 5; rem -= 5; }
++        else if (rem >= 9 && memcmp(s, "musttail", 8) == 0 && (s[8] == ' ' || s[8] == '\t')) { s += 9; rem -= 9; }
++        else if (rem >= 7 && memcmp(s, "notail", 6) == 0 && (s[6] == ' ' || s[6] == '\t')) { s += 7; rem -= 7; }
++        while (rem && (*s == ' ' || *s == '\t')) { s++; rem--; }
++        static const char kNoop[] = "call void asm sideeffect \"\", \"\"()";
++        if (rem >= sizeof(kNoop) - 1 && memcmp(s, kNoop, sizeof(kNoop) - 1) == 0) {
++            stripped++;
++        } else {
++            memcpy(out, p, linelen);
++            out += linelen;
++            if (eol) *out++ = '\n';
++        }
++        p = eol ? eol + 1 : p + linelen;
++    }
++    *out = '\0';
++    if (!stripped) { free(dst); return ll; }
++    static _Atomic unsigned long long nstrip;
++    const unsigned long long k = atomic_fetch_add_explicit(&nstrip, 1, memory_order_relaxed) + 1;
++    if (k <= 8 || (k & 255) == 0)
++        nvlog("translate: stripped %u no-op empty inline-asm barrier(s) from AIR (%llu total)", stripped, k);
++    NSString *res = [NSString stringWithUTF8String:dst] ?: ll;
++    free(dst);
++    return res;
++}
++
+ NSData *nvmtl_compile_library_entry(NSData *air, NSString *ll, NSString *stage, NSString *name, NSString **error) {
+     if (!air || !ll || !stage || !nvmtl_xlate_ready()) { if(error)*error=@"missing entry or translator"; return nil; }
+     if (air.length >= 20 && *(const uint32_t *)air.bytes == 0x07230203u) return air;
+@@ -861,7 +902,8 @@ static BOOL nvmtl_entry_of(NSString *ll, NSString **name, NSString **stage) {
+         if (hit) { gSpvHit++; nvmtl_cache_touch(spvp.fileSystemRepresentation); }
+         else {
+             gSpvMiss++;
+-            if (xlate(ll.UTF8String, stage.UTF8String, &spv, &spvn, err, sizeof err) != 0) {
++            NSString *llClean = nvmtl_air_strip_noop_asm(ll);
++            if (xlate(llClean.UTF8String, stage.UTF8String, &spv, &spvn, err, sizeof err) != 0) {
+                 nvlog("library: translate %s (%s) FAILED: %s", name.UTF8String, stage.UTF8String, err); if (error) *error = @(err); return nil;
+             }
+             spvData = [NSData dataWithBytes:spv length:spvn];
+@@ -1200,9 +1242,10 @@ int nvmtl_stat_same(const struct stat *a, const struct stat *b) {
+     if (!nvmtl_xlate_ready()) { if (err) *err = @"the AIR->SPIR-V translator is not loaded"; return nil; }
+     if (!xlate_fc) { if (err) *err = @"this translator has no nvmtl_translate_fc — rebuild nvmtl_translate"; return nil; }
+     if (!ll || !stage.length) { if (err) *err = @"no AIR kept for this function"; return nil; }
++    NSString *llClean = nvmtl_air_strip_noop_asm(ll);
+     uint8_t *out = NULL; size_t out_len = 0; char e[512] = {0};
+-    if (xlate_fc(ll.UTF8String, stage.UTF8String, idx, sizes, payloads, n, &out, &out_len, e, sizeof e) != 0) {
+-        if (g_fc_expect_link && nvmtl_needs_visible_link(ll, @(e)))
++    if (xlate_fc(llClean.UTF8String, stage.UTF8String, idx, sizes, payloads, n, &out, &out_len, e, sizeof e) != 0) {
++        if (g_fc_expect_link && nvmtl_needs_visible_link(llClean, @(e)))
+             nvlog("function constants: this function calls linked visible functions; it is specialized when its pipeline is created");
+         else nvlog("function constants: re-translate FAILED: %s", e);
+         // NVMTL_FC_FAIL_DUMP=<dir>: keep the refused module (AIR text, stage, constant values, error) so the refusal can be
+@@ -1721,11 +1764,12 @@ static void nvmtl_air_argbuf_walk(NSDictionary *nodes, NSString *node, NSUIntege
+         lens[idx] = (uint32_t)len; if ((uint32_t)idx + 1 > high) high = (uint32_t)idx + 1;
+     }
+     if (high && xlate_tglen) xlate_tglen(lens, high);
++    NSString *airClean = nvmtl_air_strip_noop_asm(fn->_air);
+     NSData *data = nil; uint8_t *out=NULL; size_t len=0; char e[1024]={0};
+     if (states.count) {
+         NSData *json=[NSJSONSerialization dataWithJSONObject:@{@"samplers":states,@"constants":fn->_fc ?: @{}} options:NSJSONWritingSortedKeys error:NULL];
+         NSString *s=[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
+-        if(xlate_sampler(fn->_air.UTF8String,fn->_stage.UTF8String,s.UTF8String,&out,&len,e,sizeof e)) { if(err)*err=@(e); }
++        if(xlate_sampler(airClean.UTF8String,fn->_stage.UTF8String,s.UTF8String,&out,&len,e,sizeof e)) { if(err)*err=@(e); }
+         else { data=[NSData dataWithBytes:out length:len]; xlate_free(out,len); }
+     } else if (fn->_fc.count) {
+         if (!xlate_fc) { if(err)*err=@"this translator has no nvmtl_translate_fc \u2014 rebuild nvmtl_translate"; return nil; }
+@@ -1755,12 +1799,12 @@ static void nvmtl_air_argbuf_walk(NSDictionary *nodes, NSString *node, NSUIntege
+                 nvlog("ZFC idx %-4u size %-2u bytes %s", idx[nfc-1], sz[nfc-1], fx);
+             }
+         }
+-        if(xlate_fc(fn->_air.UTF8String,fn->_stage.UTF8String,idx,sz,pay,nfc,&out,&len,e,sizeof e)) { if(err)*err=@(e); }
++        if(xlate_fc(airClean.UTF8String,fn->_stage.UTF8String,idx,sz,pay,nfc,&out,&len,e,sizeof e)) { if(err)*err=@(e); }
+         else { data=[NSData dataWithBytes:out length:len]; xlate_free(out,len);
+                nvlog("threadgroup variant: %s re-specialized with %zu constant(s) -> %lu B",
+                      fn->_fname.UTF8String, nfc, (unsigned long)data.length); }
+     } else {
+-        if(xlate(fn->_air.UTF8String,fn->_stage.UTF8String,&out,&len,e,sizeof e)) { if(err)*err=@(e); }
++        if(xlate(airClean.UTF8String,fn->_stage.UTF8String,&out,&len,e,sizeof e)) { if(err)*err=@(e); }
+         else { data=[NSData dataWithBytes:out length:len]; xlate_free(out,len); }
+     }
+     if (high && xlate_tglen) xlate_tglen(NULL, 0);
+@@ -1791,10 +1835,11 @@ static void nvmtl_air_argbuf_walk(NSDictionary *nodes, NSString *node, NSUIntege
+     if (!states.count && !a8) return fn->_spirv;
+     if (!fn->_air && !states.count) return fn->_spirv;   // already a specialised variant (no AIR kept): nothing more to apply
+     if (!fn->_air || !nvmtl_xlate_ready() || !xlate_sampler) { if(err)*err=@"sampler specialization has no AIR or translator";return nil; }
++    NSString *airClean = nvmtl_air_strip_noop_asm(fn->_air);
+     NSData *json=[NSJSONSerialization dataWithJSONObject:@{@"samplers":states ?: @{},@"constants":fn->_fc ?: @{},@"a8_targets":@(a8)} options:NSJSONWritingSortedKeys error:NULL];
+     NSString *s=[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
+     uint8_t *out=NULL;size_t len=0;char e[1024]={0};
+-    if(xlate_sampler(fn->_air.UTF8String,fn->_stage.UTF8String,s.UTF8String,&out,&len,e,sizeof e)) {if(err)*err=@(e);return nil;}
++    if(xlate_sampler(airClean.UTF8String,fn->_stage.UTF8String,s.UTF8String,&out,&len,e,sizeof e)) {if(err)*err=@(e);return nil;}
+     NSData *data=[NSData dataWithBytes:out length:len];xlate_free(out,len);return data;
+ }
+ 
 diff --git a/src/nmplugin/NVMTLObjects.h b/src/nmplugin/NVMTLObjects.h
 index bba8b36..1fb1282 100644
 --- a/src/nmplugin/NVMTLObjects.h

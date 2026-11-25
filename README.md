@@ -42,6 +42,8 @@ Minisforum UM790 Pro Hackintosh 专项性能优化合集，聚焦 **AMD Zen 4 �
    - 在 `newSamplerStateWithDescriptor:` 为无 `label` 的不可变采样器增加 256 槽线程安全缓存，并复用静态 `dispatch_once` 字符串数组、在展开 `.description.UTF8String` 前进行日志限流。
 5. **非 256B 对齐线性纹理快速失败与格式查询缓存**：
    - 在 `nvmtl_vk_image_create_buffer_alias_lifetime_body` 中对 AMD 非 256B 对齐行距的线性纹理直接静默快速失败，并原子缓存 Vulkan 格式属性查询函数指针。
+6. **过滤 AIR 空内联汇编内存屏障（修复 Chromium / Electron UI 渐变文字隐身）**：
+   - 在转译前通过 `nvmtl_air_strip_noop_asm()` 安全剔除 LLVM 生成的空内联汇编屏障 `[tail|musttail|notail] call void asm sideeffect "", ""()`（`libnvmtl_translate` 会因 `opcode=tail` / `opcode=call` 拒绝编译导致 Skia 文本渐变着色器缺失、`draw with no pipeline set`），实测修复 `aircache` 中 **30 / 30** 失败的 `@main0` 着色器。
 
 ### 3. `um790-bench/`：零重启稳定性、CPU 与 Metal→Vulkan 压测审计套件
 - 原生 Metal/CPU 压测核心 [`src/metal_stress.m`](um790-bench/src/metal_stress.m) + 编排 CLI [`um790bench.py`](um790-bench/um790bench.py)。
