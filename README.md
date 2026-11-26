@@ -48,7 +48,10 @@ Minisforum UM790 Pro Hackintosh 专项性能优化合集，聚焦 **AMD Zen 4 �
    - **按需 `MUTABLE_FORMAT_BIT` + `VkImageFormatListCreateInfo`（默认开启，`NVMTL_NO_DCC_OPT=1` 关闭）**：在 `NVMTLDevice.newTextureWithDescriptor:` 与 `nvmtl_vk_image_mutable()` 中根据 `MTLTextureUsagePixelFormatView` 按需决定可变格式标记；普通非 `ShaderWrite` 颜色/MSAA 目标若仅有 sRGB/线性配对则附加 `VkImageFormatListCreateInfo` 并记录 `vpair`，其余单格式渲染目标不再无条件加 `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`，解锁 Radeon 780M RADV GFX11 DCC 带宽压缩。
    - **AMD 默认关闭 Framebuffer Fetch（`NVMTL_FBFETCH=1` 按需开启）**：避免 Chrome WebGL 等普通应用在所有颜色附件上强制附加 `VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT`、`VK_IMAGE_LAYOUT_GENERAL` 与 subpass 自依赖屏障。
    - **对所有 AMD 进程开放 `NVMTL_RP_LIGHT` 轻量 RenderPass 屏障**：移除此前 `nvmtl_rp_light()` 的仅限 `WindowServer` 限制，省去每个 RenderPass 结束时冗余的 `ALL_COMMANDS` 全管线排空与缓存刷新（统一由下一 Pass 入口及 submit 结尾宿主可见屏障保证一致性）。
-   - **AMD 默认启用 `RADV_PERFTEST=nggc` 与放宽每进程显存软上限至 `512 MiB`**：`nvmtl_vk_initialize()` 在载入 RADV ICD 前自动启用 `nggc`（`NVMTL_NO_RADV_NGGC=1` 可关），`nvrm610.conf` 允许配置 `RADV_` 变量；`nvmtl_amd_vram_cap()` 从 `256/128 MiB` 提升至统一 **`512 MiB`**，大幅减少浏览器/桌面合成纹理被提前溢出到系统内存路径。
+   - **支持 `nvrm610.conf` 配置 `RADV_` 并统一提升每进程显存软上限至 `512 MiB`**：`nvmtl_amd_vram_cap()` 从 `256/128 MiB` 提升至统一 **`512 MiB`**，大幅减少浏览器/桌面合成纹理被提前溢出到系统内存路径（注：实测发现 `RADV_PERFTEST=nggc` 在 Chrome 复杂管线下会触发 `radv_CreateGraphicsPipelines + 8009` 空指针崩溃，故**保持默认关闭**，仅保留通过 `nvrm610.conf` 显式配置 `RADV_` 变量的能力）。
+8. **`surface-in prologue` 异步合批上传与扩大 IOSurface 缓存池（消除视频播放与桌面过渡掉帧）**：
+   - **非 256B 对齐纹理上传改异步合批（默认开启，`NVMTL_SURFIN_PROLOGUE=0` 可关闭）**：针对 1080p HEVC/NV12 等行宽非 `256` 倍数（走 `_hostCopy`）的 `IOSurface` 与 buffer 纹理，将 `nvmtlSurfaceInDefer:YES` 中的上传操作（`nvmtl_vk_pre_copy_buf_to_img()`）延后并合并至 `[cb commit]` 的 pre-submit prologue 中随渲染命令一次提交，彻底消除每帧同步 `vkWaitForFences` 卡死 GPU 主线程的问题（`1920×1080` 非 256B 对齐实测：Encode P50 `0.211 → 0.095 ms` / **-55.0%**，Total P95 `1.586 → 0.454 ms` / **-71.4%**，吞吐 `+30.5%`）。
+   - **扩大 `nvmtl_surface_keep` 空闲缓存池**：在 `src/nmplugin/NVMTLDevice.m` 中将空闲保留上限从 `48 条目 / 192 MiB / 2s TTL` 提升至 **`128 条目 / 384 MiB / 4s TTL`**，防止 `WindowServer` 在后台视频解码 + 系统过渡动画并发时频繁驱逐并重新通过内核 `acd_kext_bo_import_host` / `acd_kext_bo_create` 映射 `IOSurface`。
 
 ### 3. `um790-bench/`：零重启稳定性、CPU 与 Metal→Vulkan 压测审计套件
 - 原生 Metal/CPU 压测核心 [`src/metal_stress.m`](um790-bench/src/metal_stress.m) + 编排 CLI [`um790bench.py`](um790-bench/um790bench.py)。
@@ -88,10 +91,11 @@ Minisforum UM790 Pro Hackintosh 专项性能优化合集，聚焦 **AMD Zen 4 �
 | **全部新默认 vs 优化前** (`180` 帧) | `FBFETCH=1, RP_LIGHT=0, CAP=128MB, NO_DCC_OPT=1, RADV_PERFTEST=` | 默认全开 | **`135.4 → 173.8 FPS (+28.4%)` \| P50 `6.292 → 4.725 ms (-24.9%)` \| P95 `10.876 → 9.503 ms (-12.6%)`** |
 | **单项：GFX11 DCC 格式表优化** (`150` 帧) | `NVMTL_NO_DCC_OPT=1` | 默认开启 | **`150.0 → 191.4 FPS (+27.6%)` \| P50 `5.386 → 4.247 ms (-21.1%)` \| P95 `11.939 → 8.556 ms (-28.3%)`** |
 | **单项：AMD 默认关闭 Framebuffer Fetch** (`150` 帧) | 此前默认开启 | `NVMTL_NO_FBFETCH=1` | **`188.0 → 241.1 FPS (+28.2%)` \| P50 `4.587 → 3.710 ms (-19.1%)` \| P95 `8.829 → 5.536 ms (-37.3%)`** |
-| **单项：`RADV_PERFTEST=nggc`** (`150` 帧) | `NVMTL_NO_FBFETCH=1` | `+ nggc` | **`149.5 → 163.0 FPS (+9.0%)` \| P50 `6.428 → 5.705 ms (-11.2%)` \| P95 `10.740 → 9.254 ms (-13.8%)`** |
+| **单项：`RADV_PERFTEST=nggc`（实验性，未默认启用）** (`150` 帧) | `NVMTL_NO_FBFETCH=1` | `+ nggc` | **`149.5 → 163.0 FPS (+9.0%)` \| P50 `6.428 → 5.705 ms (-11.2%)`**（注：Chrome 实测崩溃，未默认开启） |
 | **单项：`NVMTL_RP_LIGHT=1`** (`150` 帧) | `NVMTL_RP_LIGHT=0` | `NVMTL_RP_LIGHT=1` | **`169.0 → 173.9 FPS (+2.9%)` \| P50 `5.143 → 4.814 ms (-6.4%)` \| Encode P50 `-14.7%`** |
+| **单项：`surface-in prologue` (`1920×1080 bpr=1920`)** (`120` 帧) | `NVMTL_SURFIN_PROLOGUE=0` | 默认开启 | **`2707.6 → 3533.1 FPS (+30.5%)` \| Enc P50 `0.211 → 0.095 ms (-55.0%)` \| Tot P95 `1.586 → 0.454 ms (-71.4%)`** |
 
-> 完整新默认综合基准（`20261126-201002-after-dcc-rp-nggc`）：`Composite 175.0 FPS`（`<8.33ms` 达 **90.8%**，`Total P50 4.519 ms`），`VRAM Stress 320 MiB + 24 管线 290.4 ms`，`hang_kills / gpu_timeouts / iop_fail / new_crashes / -1000158000 / alloc_refused` 全部为 **`0`**。
+> 完整新默认综合基准（`20261126-205455-after-surfin-prologue`）：`Composite 171.6 FPS`（`<8.33ms` 达 **91.7%**，`Enc P50/P95 0.603/1.360 ms`，`Tot P50/P95 5.445/8.556 ms`），`VRAM Stress 320 MiB + 24 管线 398.7 ms`，`hang_kills / gpu_timeouts / iop_fail / new_crashes / -1000158000 / alloc_refused` 全部为 **`0`**。
 
 ### `WindowServer` / `NVMTLDriver` 运行日志改善
 - `-1000158000` 线性缓冲纹理创建报错：`98,304 → 0`

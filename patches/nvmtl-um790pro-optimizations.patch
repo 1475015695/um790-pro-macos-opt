@@ -1,5 +1,5 @@
 diff --git a/src/nmplugin/NVMTLDevice.m b/src/nmplugin/NVMTLDevice.m
-index 0948714..56a358e 100644
+index 0948714..28f24ba 100644
 --- a/src/nmplugin/NVMTLDevice.m
 +++ b/src/nmplugin/NVMTLDevice.m
 @@ -10,6 +10,7 @@
@@ -215,15 +215,15 @@ index 0948714..56a358e 100644
 +        if (env && *env) {
 +            char *endp = NULL;
 +            unsigned long long ms = strtoull(env, &endp, 10);
-+            ttlNs = (endp && *endp == '\0') ? (ms * 1000000ULL) : (2000ULL * 1000000ULL);
++            ttlNs = (endp && *endp == '\0') ? (ms * 1000000ULL) : (4000ULL * 1000000ULL);
 +        } else {
-+            ttlNs = 2000ULL * 1000000ULL;
++            ttlNs = 4000ULL * 1000000ULL;
 +        }
 +    }
 +    return ttlNs;
 +}
-+#define NVMTL_KEEP_MAX_IDLE 48u
-+#define NVMTL_KEEP_MAX_IDLE_BYTES (192ULL << 20)
++#define NVMTL_KEEP_MAX_IDLE 128u
++#define NVMTL_KEEP_MAX_IDLE_BYTES (384ULL << 20)
 +
  // A surface's backing (a private image, or the surface's own pages imported for the GPU) lives as long as the application
  // keeps the surface, not just as long as one of its wrappers: CoreImage makes a new MTLTexture for every pass over a
@@ -840,7 +840,7 @@ index 2cd6f6e..44f4497 100644
  }
  
 diff --git a/src/nmplugin/NVMTLObjects.h b/src/nmplugin/NVMTLObjects.h
-index bba8b36..1fb1282 100644
+index bba8b36..ff872ca 100644
 --- a/src/nmplugin/NVMTLObjects.h
 +++ b/src/nmplugin/NVMTLObjects.h
 @@ -19,6 +19,9 @@ static inline NSMutableData *nvmtl_fc_storage(NSUInteger count) {
@@ -865,7 +865,15 @@ index bba8b36..1fb1282 100644
    BOOL _stex;
    uint64_t _resid;
    NSUInteger _usage;
-@@ -201,6 +205,7 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
+@@ -57,6 +61,7 @@ static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); return
+ - (void *)nvview;
+ - (void *)nvsampleview;
+ - (void)nvmtlSurfaceIn;
++- (void)nvmtlSurfaceInDefer:(BOOL)defer;
+ - (BOOL)nvmtlSurfaceOut;
+ - (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied;
+ @end
+@@ -201,6 +206,7 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
    NSMutableDictionary *_vertexSamplers, *_fragmentSamplers;
    NSData *_pixelSamplerKey; // sampler specialization depends on values, not the draw or pipeline
    NSMutableArray *_pixelSamplerKeys; // at most eight recent value snapshots, owned by this encoder
@@ -874,7 +882,7 @@ index bba8b36..1fb1282 100644
    // Apple's GL rebinds buffers for every draw, and a dictionary of (buffer, offset) arrays allocated on each one
    NVMTLBuffer *_vbufAt[NVMTL_NBUFAT], *_fbufAt[NVMTL_NBUFAT]; NSUInteger _vbufOff[NVMTL_NBUFAT], _fbufOff[NVMTL_NBUFAT];
 diff --git a/src/nmplugin/NVMTLObjects.m b/src/nmplugin/NVMTLObjects.m
-index 6f826a5..6c03098 100644
+index 6f826a5..8c8b2f5 100644
 --- a/src/nmplugin/NVMTLObjects.m
 +++ b/src/nmplugin/NVMTLObjects.m
 @@ -117,7 +117,7 @@ static void nvbt(const char *tag, int *count, int max) {
@@ -916,7 +924,66 @@ index 6f826a5..6c03098 100644
          if (nvmtl_vk_mig_batch_begin() == 0) gRes2Batching = 1;
          { static unsigned said; if (said++ < 16 || said % 1024 == 0)
              nvlog("residency (res2): pressure pass wants %llu MB - registry %lu, victims left %lu of %lu, "
-@@ -998,7 +1003,8 @@ static int nvmtl_trace_on(void) {
+@@ -686,7 +691,57 @@ static void nvmtl_zero_flush(void) {
+     } else if (todo.count) nvlog("zero-fill: no command buffer for %lu Private clears - they hold what VRAM held", (unsigned long)todo.count);
+     gZeroInFlush = 0;
+ }
+-static void nvmtl_presubmit(void) { @autoreleasepool { nvmtl_zero_flush(); } @autoreleasepool { nvmtl_managed_flush(); } }
++static os_unfair_lock gSurfInLock = OS_UNFAIR_LOCK_INIT;
++static NSHashTable *gSurfInOwed;
++static _Atomic int gSurfInAny;
++static __thread int gSurfInInFlush;
++static _Atomic unsigned long long gSurfInProN, gSurfInProB;
++static void nvmtl_surfin_mark(NVMTLTexture *r) {
++    os_unfair_lock_lock(&gSurfInLock);
++    if (!gSurfInOwed) gSurfInOwed = [NSHashTable weakObjectsHashTable];
++    @autoreleasepool { [gSurfInOwed addObject:r]; }
++    atomic_store(&gSurfInAny, 1);
++    nvmtl_pre_submit_hook = nvmtl_presubmit;
++    os_unfair_lock_unlock(&gSurfInLock);
++}
++static void nvmtl_surfin_flush(void) {
++    if (!atomic_load(&gSurfInAny) || gSurfInInFlush) return;
++    gSurfInInFlush = 1;
++    os_unfair_lock_lock(&gSurfInLock);
++    NSArray *todo = gSurfInOwed.allObjects; [gSurfInOwed removeAllObjects]; atomic_store(&gSurfInAny, 0);
++    os_unfair_lock_unlock(&gSurfInLock);
++    if (todo.count && nvmtl_vk_pre_open()) {
++        unsigned n = 0; size_t bytes = 0;
++        for (NVMTLTexture *r in todo) {
++            if (r->_bufCopy && r->_backBuf) {
++                if (nvmtl_vk_pre_copy_buf_to_img(&r->_i, &r->_backBuf->_b, r->_backOff, r->_backBPR) == 0) {
++                    n++; bytes += (size_t)r->_i.h * r->_backBPR;
++                } else {
++                    nvlog("surface-in prologue: bufCopy %ux%u FAILED", r->_i.w, r->_i.h);
++                }
++            } else if (r->_hostCopy && r->_hostBuf.buf) {
++                if (nvmtl_vk_pre_copy_buf_to_img(&r->_i, &r->_hostBuf, r->_hostOff, r->_hostRow) == 0) {
++                    n++; bytes += (size_t)r->_i.h * r->_hostRow;
++                } else {
++                    nvlog("surface-in prologue: hostCopy %ux%u FAILED", r->_i.w, r->_i.h);
++                }
++            }
++        }
++        nvmtl_pre_release_hook = nvmtl_pre_release;
++        nvmtl_vk_pre_hold((__bridge_retained void *)todo);
++        const unsigned long long k = atomic_fetch_add(&gSurfInProN, n); gSurfInProB += bytes;
++        if (n && (!k || (k >> 12) != ((k + n) >> 12)))
++            nvlog("surface-in prologue census: %llu deferred host_xfer uploads (%llu KB) rode submit prologues",
++                  (unsigned long long)(k + n), (unsigned long long)(gSurfInProB >> 10));
++    } else if (todo.count) {
++        for (NVMTLTexture *r in todo) {
++            if (r->_bufCopy && r->_backBuf) (void)nvmtl_vk_image_host_xfer(r->_q, &r->_i, &r->_backBuf->_b, r->_backOff, r->_backBPR, 1);
++            else if (r->_hostCopy && r->_hostBuf.buf) (void)nvmtl_vk_image_host_xfer(r->_q, &r->_i, &r->_hostBuf, r->_hostOff, r->_hostRow, 1);
++        }
++    }
++    gSurfInInFlush = 0;
++}
++static void nvmtl_presubmit(void) { @autoreleasepool { nvmtl_zero_flush(); } @autoreleasepool { nvmtl_managed_flush(); } @autoreleasepool { nvmtl_surfin_flush(); } }
+ static int nvmtl_mzero_on(void) {
+     static int on = -1;
+     if (on < 0) { const char *e = getenv("NVMTL_MANAGED_EAGER_ZERO"); on = !(e && e[0] == '1');
+@@ -998,7 +1053,8 @@ static int nvmtl_trace_on(void) {
  #if NVMTL_RELEASE
      return 0;   // the request files are refused in release builds (nvmtl_rel_access), so tracing never turns on
  #endif
@@ -926,7 +993,16 @@ index 6f826a5..6c03098 100644
      uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
      static int cap = 2500;
      if (now >= next) { next = now + 250000000ull; int was = on; on = access("/tmp/nvmtl-trace-request", F_OK) == 0;
-@@ -1082,7 +1088,8 @@ static void nvmtl_census(const char *what, uint32_t w, uint32_t h, int surf) {
+@@ -1063,7 +1119,7 @@ static void nvmtl_surface_in_for_cb(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
+     // Importing the old CPU surface here would run ahead of this buffer and
+     // overwrite that earlier GPU write. Queue order or the application's event supplies the dependency.
+     if (nvmtl_surface_pending_write(cb, r)) return;
+-    [t nvmtlSurfaceIn];
++    [t nvmtlSurfaceInDefer:YES];
+ }
+ static unsigned nvmtl_surf_id(NVMTLTexture *t) { NVMTLTexture *r = (t && t->_parent) ? t->_parent : t; return (r && r->_surf) ? (unsigned)IOSurfaceGetID(r->_surf) : 0u; }
+ static int nvmtl_noseed(void) { static uint64_t next; static int on; uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+@@ -1082,7 +1138,8 @@ static void nvmtl_census(const char *what, uint32_t w, uint32_t h, int surf) {
  }
  static void nvmtl_frame_dump(const char *tag, const void *base, size_t row, uint32_t w, uint32_t h);
  static void nvmtl_surface_cpu_dump(NVMTLTexture *rt) {
@@ -936,7 +1012,7 @@ index 6f826a5..6c03098 100644
      uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
      if (now >= next) { next = now + 250000000ull; on = access("/tmp/nvmtl-dump-request", F_OK) == 0; }
      if (!on || !rt || !rt->_surf || IOSurfaceGetBytesPerElement(rt->_surf) != 4 || IOSurfaceGetPlaneCount(rt->_surf) > 1) return;
-@@ -1236,7 +1243,7 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
+@@ -1236,7 +1293,7 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
          id monitor = objc_getAssociatedObject(t, &key);
          if (!monitor) {
              if (!monitors) monitors = [NSMapTable strongToWeakObjectsMapTable];
@@ -945,7 +1021,13 @@ index 6f826a5..6c03098 100644
              monitor = [monitors objectForKey:surface];
              if (!monitor) { monitor = [NSObject new]; [monitors setObject:monitor forKey:surface]; }
              objc_setAssociatedObject(t, &key, monitor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-@@ -1265,10 +1272,16 @@ - (void)nvmtlSurfaceIn {
+@@ -1262,14 +1319,26 @@ static uint64_t nvmtl_buftex_hash(NVMTLTexture *r, const uint8_t *p) {
+     return h;
+ }
+ - (void)nvmtlSurfaceIn {
++    [self nvmtlSurfaceInDefer:NO];
++}
++- (void)nvmtlSurfaceInDefer:(BOOL)defer {
      NVMTLTexture *r = _parent ? _parent : self;
      if (r->_bufCopy) {   // refilled when the buffer's bytes differ from what the image last matched (no seed to compare)
          @synchronized (r) {
@@ -960,11 +1042,16 @@ index 6f826a5..6c03098 100644
          const uint64_t h = p ? nvmtl_buftex_hash(r, p) : 0;
          if (r->_bufHashed && (!p || h == r->_bufHash)) return;   // unchanged, or only the GPU can change it
 -        nvmtl_buffer_sync_in(r->_backBuf);   // a no-copy buffer whose pages were not imported is a copy: bring it up first
+-        if (nvmtl_vk_image_host_xfer(r->_q, &r->_i, &r->_backBuf->_b, r->_backOff, r->_backBPR, 1))
 +        if (!r->_backBuf || !r->_backBuf->_hostPtr) nvmtl_buffer_sync_in(r->_backBuf);   // a no-copy buffer whose pages were not imported is a copy: bring it up first
-         if (nvmtl_vk_image_host_xfer(r->_q, &r->_i, &r->_backBuf->_b, r->_backOff, r->_backBPR, 1))
++        if (defer && nvmtl_vk_surfin_prologue_on() && r->_backBuf && nvmtl_vk_image_host_xfer_ok(&r->_i, &r->_backBuf->_b, r->_backOff, r->_backBPR)) {
++            nvmtl_vk_image_mark_sampled_layout(&r->_i);
++            nvmtl_surfin_mark(r);
++        } else if (nvmtl_vk_image_host_xfer(r->_q, &r->_i, &r->_backBuf->_b, r->_backOff, r->_backBPR, 1))
              { static int said; if (said++ < 4) nvlog("buffer texture copy: refill FAILED (%ux%u at offset %lu, bytesPerRow %lu)", r->_i.w, r->_i.h, (unsigned long)r->_backOff, (unsigned long)r->_backBPR); return; }
          r->_bufHash = h; r->_bufHashed = YES;
-@@ -1277,11 +1290,12 @@ - (void)nvmtlSurfaceIn {
+         }
+@@ -1277,11 +1346,12 @@ - (void)nvmtlSurfaceIn {
      }
      if (!r->_surf || r->_hostOn) return;   // host-backed: the GPU reads the surface's own pages
      @synchronized (nvmtl_surface_sync(r)) {
@@ -980,16 +1067,24 @@ index 6f826a5..6c03098 100644
            r->_surfSeed = now; r->_surfSynced = YES; g_surfin_skip++;
            static unsigned ns; if (ns++ < 6 || ns % 2000 == 0) nvlog("item 7: surface-in SKIPPED (shared VRAM current at seed %u): %llu skipped, %llu copied", now, g_surfin_skip, g_surfin_copy);
            return; } }
-@@ -1290,7 +1304,7 @@ - (void)nvmtlSurfaceIn {
+@@ -1290,8 +1360,14 @@ - (void)nvmtlSurfaceIn {
      void *base = IOSurfaceGetBaseAddressOfPlane(r->_surf, (uint32_t)r->_plane);
      size_t row = IOSurfaceGetBytesPerRowOfPlane(r->_surf, (uint32_t)r->_plane);
      int rc = -1;
 -    if (r->_hostCopy && row == r->_hostRow) rc = nvmtl_vk_image_host_xfer(r->_q, &r->_i, &r->_hostBuf, 0, row, 1);
-+    if (r->_hostCopy && row == r->_hostRow) rc = nvmtl_vk_image_host_xfer(r->_q, &r->_i, &r->_hostBuf, r->_hostOff, row, 1);
-     if (rc && base && row) rc = nvmtl_vk_image_write(r->_q, &r->_i, base, row);
+-    if (rc && base && row) rc = nvmtl_vk_image_write(r->_q, &r->_i, base, row);
++    if (defer && r->_hostCopy && row == r->_hostRow && nvmtl_vk_surfin_prologue_on() && nvmtl_vk_image_host_xfer_ok(&r->_i, &r->_hostBuf, r->_hostOff, row)) {
++        nvmtl_vk_image_mark_sampled_layout(&r->_i);
++        nvmtl_surfin_mark(r);
++        rc = 0;
++    } else {
++        if (r->_hostCopy && row == r->_hostRow) rc = nvmtl_vk_image_host_xfer(r->_q, &r->_i, &r->_hostBuf, r->_hostOff, row, 1);
++        if (rc && base && row) rc = nvmtl_vk_image_write(r->_q, &r->_i, base, row);
++    }
      if (!rc && r->_i.bpp == 4) { char tag[24]; snprintf(tag, sizeof tag, "in%u-", (unsigned)IOSurfaceGetID(r->_surf)); nvmtl_frame_dump(tag, base, row, r->_i.w, r->_i.h); }
      IOSurfaceUnlock(r->_surf, kIOSurfaceLockReadOnly, NULL);
-@@ -1338,7 +1352,9 @@ - (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied {
+     if (rc) { nvlog("G13 surface-in: upload FAILED (%ux%u) — retried at the next use", r->_i.w, r->_i.h); return; }
+@@ -1338,7 +1414,9 @@ - (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied {
              static int said; if (said++ < 4) nvlog("buffer texture copy: write-back FAILED (%ux%u at offset %lu)", r->_i.w, r->_i.h, (unsigned long)r->_backOff);
              return NO; }
          nvmtl_buffer_sync_out(r->_backBuf);
@@ -1000,7 +1095,7 @@ index 6f826a5..6c03098 100644
          if (p) { r->_bufHash = nvmtl_buftex_hash(r, p); r->_bufHashed = YES; }
          }
          return YES;
-@@ -1364,13 +1380,13 @@ - (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied {
+@@ -1364,13 +1442,13 @@ - (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied {
      void *base = IOSurfaceGetBaseAddressOfPlane(r->_surf, (uint32_t)r->_plane);
      size_t row = IOSurfaceGetBytesPerRowOfPlane(r->_surf, (uint32_t)r->_plane);
      int rc = -1;
@@ -1016,7 +1111,7 @@ index 6f826a5..6c03098 100644
      if (r->_vramOn && !lockopt) nvmtl_vram_tag_set(r->_surf, r->_plane, seed);
      static unsigned n; if (n++ < 6 || n % 2000 == 0) nvlog("G13 surface-out #%u: %ux%u surface %p seed %u, %.2f ms", n, r->_i.w, r->_i.h,
          (void *)r->_surf, seed, (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0) / 1e6);
-@@ -2788,6 +2804,7 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
+@@ -2788,6 +2866,7 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
      return YES;
  }
  - (NVMTLRenderPipelineState *)nvmtlSamplerPipeline {
@@ -1024,7 +1119,7 @@ index 6f826a5..6c03098 100644
      NVMTLRenderPipelineState *selected=_ps;
      {
          NSDictionary *vS=nil,*fS=nil;
-@@ -2833,6 +2850,7 @@ - (NVMTLRenderPipelineState *)nvmtlSamplerPipeline {
+@@ -2833,6 +2912,7 @@ - (NVMTLRenderPipelineState *)nvmtlSamplerPipeline {
              }
          }
      }
@@ -1032,7 +1127,7 @@ index 6f826a5..6c03098 100644
      return selected;
  }
  - (BOOL)nvmtlBindSamplerPipeline {
-@@ -3046,6 +3064,7 @@ - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)ps {
+@@ -3046,6 +3126,7 @@ - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)ps {
          nvlog("encoder: incompatible render pipeline refused before changing draw state"); return;
      }
      _ps = p;
@@ -1040,7 +1135,7 @@ index 6f826a5..6c03098 100644
      nvmtl_retain_resource(_cb, p);
      if (!_begun) {
          if (_refused) return;
-@@ -3155,7 +3174,7 @@ - (void)setFragmentSamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)i {
+@@ -3155,7 +3236,7 @@ - (void)setFragmentSamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)i {
      }
      if (!_fragmentSamplers) _fragmentSamplers=[NSMutableDictionary new];
      NSString *key=nvmtl_sampler_index_key(i);
@@ -1049,7 +1144,7 @@ index 6f826a5..6c03098 100644
      nvtrace("FRAGMENT SAMPLER[%lu] pixel=%d bound=%d %p min %u mag %u mip %u lod %.2f..%.2f",(unsigned long)i,ns && ns->_pixelState!=nil,ns!=nil,(__bridge void *)ns,
              ns ? ns->_s.desc.min_filter : 9u, ns ? ns->_s.desc.mag_filter : 9u, ns ? ns->_s.desc.mip_filter : 9u, ns ? ns->_s.desc.lod_min : 0.f, ns ? ns->_s.desc.lod_max : 0.f);
      if(ns) { if (!_cb->_resources) _cb->_resources=[NVMTLResSet new];[_cb->_resources addObject:ns]; }
-@@ -3167,7 +3186,7 @@ - (void)setVertexSamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)i {
+@@ -3167,7 +3248,7 @@ - (void)setVertexSamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)i {
      }
      if (!_vertexSamplers) _vertexSamplers=[NSMutableDictionary new];
      NSString *key=nvmtl_sampler_index_key(i);
@@ -1058,7 +1153,7 @@ index 6f826a5..6c03098 100644
      nvtrace("VERTEX SAMPLER[%lu] pixel=%d bound=%d",(unsigned long)i,ns && ns->_pixelState!=nil,ns!=nil);
      if(ns) { if (!_cb->_resources) _cb->_resources=[NVMTLResSet new];[_cb->_resources addObject:ns]; }
  }
-@@ -3539,7 +3558,7 @@ - (void)setFragmentSamplerState:(id<MTLSamplerState>)ss lodMinClamp:(float)lo lo
+@@ -3539,7 +3620,7 @@ - (void)setFragmentSamplerState:(id<MTLSamplerState>)ss lodMinClamp:(float)lo lo
      if(_fragmentSamplers[key]) {
          NSMutableDictionary *state=[_fragmentSamplers[key] mutableCopy];
          state[@"lod_min_clamp"]=@(lo);state[@"lod_max_clamp"]=@(hi);
@@ -1067,7 +1162,7 @@ index 6f826a5..6c03098 100644
      }
  }
  - (void)setVertexSamplerState:(id<MTLSamplerState>)ss lodMinClamp:(float)lo lodMaxClamp:(float)hi atIndex:(NSUInteger)i {
-@@ -3550,7 +3569,7 @@ - (void)setVertexSamplerState:(id<MTLSamplerState>)ss lodMinClamp:(float)lo lodM
+@@ -3550,7 +3631,7 @@ - (void)setVertexSamplerState:(id<MTLSamplerState>)ss lodMinClamp:(float)lo lodM
      if(_vertexSamplers[key]) {
          NSMutableDictionary *state=[_vertexSamplers[key] mutableCopy];
          state[@"lod_min_clamp"]=@(lo);state[@"lod_max_clamp"]=@(hi);
@@ -1076,7 +1171,7 @@ index 6f826a5..6c03098 100644
      }
  }
  - (void)setFragmentSamplerStates:(const id<MTLSamplerState> __unsafe_unretained [])ss lodMinClamps:(const float *)lo lodMaxClamps:(const float *)hi withRange:(NSRange)r {
-@@ -5827,12 +5846,37 @@ - (void)popDebugGroup {}
+@@ -5827,12 +5908,37 @@ - (void)popDebugGroup {}
  - (void)sampleCountersInBuffer:(id<MTLCounterSampleBuffer>)b atSampleIndex:(NSUInteger)i withBarrier:(BOOL)w { nvmtl_sample_counter(_cb, b, i, self, w); }
  @end
  
@@ -1118,7 +1213,7 @@ index 6f826a5..6c03098 100644
  }
  
  static void nvmtl_buffer_sync_out(NVMTLBuffer *b)
-@@ -5842,8 +5886,7 @@ static void nvmtl_buffer_sync_out(NVMTLBuffer *b)
+@@ -5842,8 +5948,7 @@ static void nvmtl_buffer_sync_out(NVMTLBuffer *b)
              if (nvmtl_vk_copy_buffer(nvmtl_device_queue(), &b->_b, 0, &b->_shadow, 0, b->_b.size)) nvlog("commit: managed sync-out of %zu bytes FAILED", b->_b.size); }
          return;
      }
@@ -1131,7 +1226,7 @@ index 6f826a5..6c03098 100644
 +    nvmtl_buffer_host_xfer_safe(b, b->_b.map, b->_hostPtr, NVP_SYNCOUT, "sync-out");
  }
 diff --git a/src/nmplugin/nvmtl_vk.c b/src/nmplugin/nvmtl_vk.c
-index 89ceca8..255ba6c 100644
+index 89ceca8..a658f6f 100644
 --- a/src/nmplugin/nvmtl_vk.c
 +++ b/src/nmplugin/nvmtl_vk.c
 @@ -136,10 +136,12 @@ static _Atomic long g_slow_submit_ms;
@@ -1383,21 +1478,7 @@ index 89ceca8..255ba6c 100644
      if (result == VK_SUCCESS) { *out = handle; nvmtl_pipe_cache_note_compile(); }
      else if (handle) pvkDestroyPipeline(dev, handle, allocator);
      return result;
-@@ -852,6 +956,13 @@ static int nvmtl_vk_initialize(void)
-             }
-         }
-     }
-+    if (nvmtl_vk_vendor() == 0x1002 && !getenv("RADV_PERFTEST")) {
-+        const char *no_nggc = getenv("NVMTL_NO_RADV_NGGC");
-+        if (!(no_nggc && no_nggc[0] == '1')) {
-+            setenv("RADV_PERFTEST", "nggc", 0);
-+            nvlog("vk: RADV_PERFTEST=nggc enabled by default on AMD (NVMTL_NO_RADV_NGGC=1 disables)");
-+        }
-+    }
-     g_lib = dlopen(NVMTL_ICD_LIB, RTLD_NOW | RTLD_LOCAL);
-     if (g_lib) {
-         pvkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(g_lib, "vkGetInstanceProcAddr");
-@@ -1228,6 +1339,7 @@ static int nvmtl_vk_initialize(void)
+@@ -1228,6 +1332,7 @@ static int nvmtl_vk_initialize(void)
      pvkCreatePipelineCache = (PFN_vkCreatePipelineCache)pvkGetDeviceProcAddr(g_dev, "vkCreatePipelineCache");
      pvkDestroyPipelineCache = (PFN_vkDestroyPipelineCache)pvkGetDeviceProcAddr(g_dev, "vkDestroyPipelineCache");
      pvkGetPipelineCacheData = (PFN_vkGetPipelineCacheData)pvkGetDeviceProcAddr(g_dev, "vkGetPipelineCacheData");
@@ -1405,7 +1486,7 @@ index 89ceca8..255ba6c 100644
      { VkPhysicalDeviceDepthStencilResolveProperties dsp = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES };
        VkPhysicalDeviceProperties2 pp2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &dsp };
        pvkGetPhysicalDeviceProperties2(g_pdev, &pp2);
-@@ -1349,6 +1461,7 @@ static void bpark_free(nvk_buffer *b)
+@@ -1349,6 +1454,7 @@ static void bpark_free(nvk_buffer *b)
      pvkDestroyBuffer(g_dev, (VkBuffer)b->buf, NULL);
      if (b->map && pvkUnmapMemory) pvkUnmapMemory(g_dev, (VkDeviceMemory)b->mem);
      if (b->bar1) g_bar1_bytes -= b->alloc;
@@ -1413,7 +1494,7 @@ index 89ceca8..255ba6c 100644
      pvkFreeMemory(g_dev, (VkDeviceMemory)b->mem, NULL); g_alloc_bytes -= b->alloc;
      memset(b, 0, sizeof *b);
  }
-@@ -1453,7 +1566,11 @@ static int nvmtl_vk_buffer_create_sparse(size_t size, nvk_buffer *out)
+@@ -1453,7 +1559,11 @@ static int nvmtl_vk_buffer_create_sparse(size_t size, nvk_buffer *out)
      }
      out->buf = b; out->mem = m; out->size = size; out->alloc = mr.size; out->sparse = 1; out->sysmem = sys;
      g_alloc_bytes += mr.size; g_buf_made++; g_res3_made++;
@@ -1426,7 +1507,7 @@ index 89ceca8..255ba6c 100644
      else { g_res3_madesys++; g_buf_vram_refused++;
             nvlog("vk: private buffer of %zu bytes REFUSED VRAM (our soft gate) -> system memory under a stable address (res3): %llu MB free, "
                   "heapUsage %llu of budget %llu MB, %llu refused so far", size, (unsigned long long)(bfree >> 20),
-@@ -1470,6 +1587,7 @@ int nvmtl_vk_buffer_create(size_t size, int host_visible, nvk_buffer *out)
+@@ -1470,6 +1580,7 @@ int nvmtl_vk_buffer_create(size_t size, int host_visible, nvk_buffer *out)
          if (pending.buf) pvkDestroyBuffer(g_dev, (VkBuffer)pending.buf, NULL);
          if (pending.mem) {
              if (pending.map) pvkUnmapMemory(g_dev, (VkDeviceMemory)pending.mem);
@@ -1434,7 +1515,7 @@ index 89ceca8..255ba6c 100644
              pvkFreeMemory(g_dev, (VkDeviceMemory)pending.mem, NULL);
              if (!host_visible) g_budget_stale = 1;
          }
-@@ -1539,7 +1657,11 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
+@@ -1539,7 +1650,11 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
          }
      } else VKCK(nvmtl_opaque_AllocateMemory(g_dev, &mai, NULL, &out->mem), "vkAllocateMemory(buffer)");
      out->alloc = mr.size; out->htype = (int)mai.memoryTypeIndex + 1;
@@ -1447,7 +1528,7 @@ index 89ceca8..255ba6c 100644
      VKCK(pvkBindBufferMemory(g_dev, out->buf, out->mem, 0), "vkBindBufferMemory");
      if (host_visible) { VkResult mr_ = pvkMapMemory(g_dev, out->mem, 0, VK_WHOLE_SIZE, 0, &out->map); if (mr_ != VK_SUCCESS) {
          nvlog("vk: vkMapMemory -> %d with %llu buffers live (%llu made, %llu gone), %zu bytes allocated, memory type %d", mr_,
-@@ -1680,9 +1802,35 @@ static int nvmtl_vk_3d_slice_ok(VkFormat fmt, VkImageUsageFlags usage)
+@@ -1680,9 +1795,35 @@ static int nvmtl_vk_3d_slice_ok(VkFormat fmt, VkImageUsageFlags usage)
                (unsigned)fmt, (unsigned)usage, (int)r);
      return r == VK_SUCCESS;
  }
@@ -1485,7 +1566,7 @@ index 89ceca8..255ba6c 100644
      if (ici->imageType == VK_IMAGE_TYPE_2D && ici->samples == VK_SAMPLE_COUNT_1_BIT
          && nvmtl_vk_cube_compat(out->mtl_type, ici->extent.width, ici->extent.height, ici->arrayLayers))
          ici->flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
-@@ -1836,6 +1984,18 @@ static int nvmtl_vk_vram_wall(uint64_t want, uint64_t *freev_out, uint64_t *bud_
+@@ -1836,6 +1977,18 @@ static int nvmtl_vk_vram_wall(uint64_t want, uint64_t *freev_out, uint64_t *bud_
  }
  static int nvmtl_vk_vram_wall0(uint64_t want, uint64_t *freev_out, uint64_t *bud_out, uint64_t *used_out, int *measured_out)
  {
@@ -1504,7 +1585,7 @@ index 89ceca8..255ba6c 100644
      uint64_t bud = 0, used = 0;
      int measured = nvmtl_vk_vram_budget(&bud, &used);
      uint64_t card = nvmtl_vk_vram_bytes();
-@@ -1901,10 +2061,15 @@ static VkResult nvmtl_vk_alloc_image_mem(const VkMemoryRequirements *mr, VkDevic
+@@ -1901,10 +2054,15 @@ static VkResult nvmtl_vk_alloc_image_mem(const VkMemoryRequirements *mr, VkDevic
      int gate = nvmtl_vk_vram_wall(mr->size, &freev, &bud, &used, &measured);
      VkResult r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
      if (!gate) r = pvkAllocateMemory(g_dev, &mai, NULL, mem);
@@ -1524,7 +1605,7 @@ index 89ceca8..255ba6c 100644
      if (r == VK_ERROR_OUT_OF_DEVICE_MEMORY && nvmtl_res2_evict_hook && !t_in_reclaim && !nvmtl_res2_evict_off()) {
          t_in_reclaim = 1;
          const uint64_t freed = nvmtl_res2_evict_hook(mr->size | (1ull << 63));
-@@ -1926,14 +2091,22 @@ static VkResult nvmtl_vk_alloc_image_mem(const VkMemoryRequirements *mr, VkDevic
+@@ -1926,14 +2084,22 @@ static VkResult nvmtl_vk_alloc_image_mem(const VkMemoryRequirements *mr, VkDevic
          for (uint32_t i = 0; i < g_memp.memoryTypeCount; i++)
              if ((mr->memoryTypeBits & (1u << i)) && !(g_memp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) { mt2 = (int)i; break; }
          if (mt2 >= 0) { mai.memoryTypeIndex = (uint32_t)mt2; r = pvkAllocateMemory(g_dev, &mai, NULL, mem); if (r == VK_SUCCESS) *sysmem = 1; }
@@ -1554,7 +1635,7 @@ index 89ceca8..255ba6c 100644
      }
      return r;
  }
-@@ -1992,7 +2165,9 @@ static int nvmtl_vk_image_create_ms_lifetime_body(uint32_t w, uint32_t h, uint32
+@@ -1992,7 +2158,9 @@ static int nvmtl_vk_image_create_ms_lifetime_body(uint32_t w, uint32_t h, uint32
      VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, 0, VK_IMAGE_TYPE_2D, (VkFormat)vkfmt, { w, h, 1 }, 1, layers,
          (VkSampleCountFlagBits)samples, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
          VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED };
@@ -1565,7 +1646,7 @@ index 89ceca8..255ba6c 100644
      VKCK(nvmtl_opaque_CreateImage(g_dev, &ici, NULL, &out->img), "vkCreateImage(ms)");
      VkMemoryRequirements mr; pvkGetImageMemoryRequirements(g_dev, out->img, &mr);
      VKCK(nvmtl_alloc_opaque_image_mem(&mr, &out->mem, &out->sysmem, "multisample"), "vkAllocateMemory(ms)");
-@@ -2030,7 +2205,9 @@ static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uin
+@@ -2030,7 +2198,9 @@ static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uin
          (out->bw > 1 ? 0 : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
          VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | (storage ? VK_IMAGE_USAGE_STORAGE_BIT : 0),
          VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED };
@@ -1576,7 +1657,7 @@ index 89ceca8..255ba6c 100644
      VKCK(nvmtl_opaque_CreateImage(g_dev, &ici, NULL, &out->img), "vkCreateImage");
      VkMemoryRequirements mr; pvkGetImageMemoryRequirements(g_dev, out->img, &mr);
      VKCK(nvmtl_alloc_opaque_image_mem(&mr, &out->mem, &out->sysmem, "colour"), "vkAllocateMemory(image)");
-@@ -3292,11 +3469,16 @@ static int nvmtl_fbfetch_on(void)
+@@ -3292,11 +3462,16 @@ static int nvmtl_fbfetch_on(void)
  {
      static int on = -1;
      if (on < 0) {
@@ -1596,7 +1677,7 @@ index 89ceca8..255ba6c 100644
      }
      return on;
  }
-@@ -3742,17 +3924,15 @@ static uint32_t nvmtl_rt_shape(const nvk_pipeline *p, uint32_t cf[NVMTL_NCOL], u
+@@ -3742,17 +3917,15 @@ static uint32_t nvmtl_rt_shape(const nvk_pipeline *p, uint32_t cf[NVMTL_NCOL], u
      for (uint32_t i = 0; i < n; i++) cf[i] = p->cfmts[i];
      return n;
  }
@@ -1618,7 +1699,7 @@ index 89ceca8..255ba6c 100644
          else if (e && e[0] == '1') on = 1;
          else on = (nvmtl_vk_vendor() == 0x1002) ? 1 : 0;
          if (on) nvlog("render passes: entry dependency only (NVMTL_RP_LIGHT=1)");
-@@ -4588,7 +4768,10 @@ static VkPipeline nvmtl_compute_variant(nvk_pipeline *p, const uint32_t l[3])
+@@ -4588,7 +4761,10 @@ static VkPipeline nvmtl_compute_variant(nvk_pipeline *p, const uint32_t l[3])
          VkComputePipelineCreateInfo cpi = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0,
              { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, (VkShaderModule)p->mod, "main", &si },
              (VkPipelineLayout)p->layout, VK_NULL_HANDLE, -1 };
@@ -1629,7 +1710,75 @@ index 89ceca8..255ba6c 100644
          if (r != VK_SUCCESS) {
              if (found) pvkDestroyPipeline(g_dev, found, NULL);
              nvlog("vk: compute variant %ux%ux%u -> %d — this dispatch is SKIPPED", l[0], l[1], l[2], r); found = VK_NULL_HANDLE;
-@@ -6126,6 +6309,7 @@ static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b)
+@@ -5835,7 +6011,7 @@ int nvmtl_vk_cmd_abandon(nvk_cmdbuf *c)
+ static pthread_mutex_t nvmtl_submit_mutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
+ void (*nvmtl_pre_submit_hook)(void);
+ void (*nvmtl_pre_release_hook)(void *);
+-typedef struct { nvk_cmdbuf cb; unsigned begun, n, fills, copies, nhold; unsigned long long bytes; void *hold[4]; } nvmtl_prologue;
++typedef struct { nvk_cmdbuf cb; unsigned begun, n, fills, copies, nhold; unsigned long long bytes; void *hold[8]; } nvmtl_prologue;
+ static __thread nvmtl_prologue *g_pre_cur;
+ static _Atomic unsigned long long g_pre_subs, g_pre_copies, g_pre_fills, g_pre_bytes, g_pre_fail;
+ static int nvmtl_prologue_on(void)
+@@ -5885,6 +6061,58 @@ int nvmtl_vk_pre_fill(nvk_buffer *b, size_t offset, size_t size, uint32_t word)
+     p->n++; p->fills++; p->bytes += size;
+     return 0;
+ }
++int nvmtl_vk_surfin_prologue_on(void)
++{
++    static int on = -1;
++    if (on < 0) {
++        const char *e = getenv("NVMTL_SURFIN_PROLOGUE");
++        on = nvmtl_prologue_on() && !(e && e[0] == '0');
++        nvlog("vk: surface-in prologue %s (NVMTL_SURFIN_PROLOGUE=%s)",
++              on ? "ON - non-256B-pitch host_xfer uploads ride the submit prologue" : "OFF (sync host_xfer)",
++              e ? e : "unset");
++    }
++    return on;
++}
++int nvmtl_vk_image_host_xfer_ok(const nvk_image *img, const nvk_buffer *hb, size_t offset, size_t row_bytes)
++{
++    if (!img || !img->img || !hb || !hb->buf || !img->w || !img->h) return 0;
++    const size_t bpp = img->bpp ? img->bpp : 4;
++    if (img->bw > 1 || img->bh > 1 || row_bytes % bpp || row_bytes / bpp < img->w || (offset & 3) || offset % bpp
++        || offset > hb->size || row_bytes * (img->h - 1) + (size_t)img->w * bpp > hb->size - offset) return 0;
++    return 1;
++}
++void nvmtl_vk_image_mark_sampled_layout(nvk_image *img)
++{
++    if (img) img->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
++}
++int nvmtl_vk_pre_copy_buf_to_img(nvk_image *img, nvk_buffer *hb, size_t offset, size_t row_bytes)
++{
++    nvmtl_prologue *p = g_pre_cur;
++    if (!p || !p->begun || !nvmtl_vk_image_host_xfer_ok(img, hb, offset, row_bytes)) return -1;
++    if (p->fills || p->copies) {
++        VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_WRITE_BIT,
++                               VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT };
++        pvkCmdPipelineBarrier(p->cb.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
++    }
++    const size_t bpp = img->bpp ? img->bpp : 4;
++    VkImageSubresourceRange range = { nvmtl_barrier_aspect(img), 0, 1, 0, 1 };
++    VkBufferImageCopy bic = { offset, (uint32_t)(row_bytes / bpp), 0, { nvmtl_copy_aspect(img), 0, 0, 1 },
++                              { 0, 0, 0 }, { img->w, img->h, 1 } };
++    VkImageMemoryBarrier toDst = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
++        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, range };
++    pvkCmdPipelineBarrier(p->cb.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                          0, 0, NULL, 0, NULL, 1, &toDst);
++    pvkCmdCopyBufferToImage(p->cb.cb, (VkBuffer)hb->buf, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
++    VkImageMemoryBarrier toRead = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
++        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
++        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
++        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, range };
++    pvkCmdPipelineBarrier(p->cb.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
++                          0, 0, NULL, 0, NULL, 1, &toRead);
++    p->n++; p->copies++; p->bytes += (unsigned long long)img->h * row_bytes;
++    return 0;
++}
+ void nvmtl_vk_pre_hold(void *retained)
+ {
+     nvmtl_prologue *p = g_pre_cur;
+@@ -6126,6 +6354,7 @@ static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b)
      if (b->pool) pool_buffer_release(b);
      if (!b->placed && !b->imported && b->mem && b->map && pvkUnmapMemory) { pvkUnmapMemory(g_dev, (VkDeviceMemory)b->mem); b->map = NULL; }
      if (b->bar1) g_bar1_bytes -= b->alloc;
@@ -1637,7 +1786,7 @@ index 89ceca8..255ba6c 100644
      if (!b->placed && b->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)b->mem, NULL); g_alloc_bytes -= b->alloc; }
      memset(b, 0, sizeof *b);
  }
-@@ -6215,6 +6399,7 @@ void nvmtl_vk_res2_stats(uint64_t out[5]) { out[0] = g_res2_off; out[1] = g_res2
+@@ -6215,6 +6444,7 @@ void nvmtl_vk_res2_stats(uint64_t out[5]) { out[0] = g_res2_off; out[1] = g_res2
  int nvmtl_vk_vram_room(uint64_t want) { g_budget_stale = 1; return !nvmtl_vk_vram_wall0(want, NULL, NULL, NULL, NULL); }
  uint64_t nvmtl_vk_vram_free_now(void) { uint64_t f = 0; g_budget_stale = 1; (void)nvmtl_vk_vram_wall0(0, &f, NULL, NULL, NULL); return f; }
  uint64_t nvmtl_vk_vram_headroom(void) { return NVMTL_VRAM_HEADROOM; }
@@ -1645,7 +1794,7 @@ index 89ceca8..255ba6c 100644
  void nvmtl_vk_bindless_rewrite(uint32_t slot, void *view)
  {
      if (!g_heapSet || !slot || slot >= NVMTL_BINDLESS_SLOTS || !view) return;
-@@ -6351,8 +6536,15 @@ int nvmtl_vk_buffer_migrate(nvk_buffer *b, int to_sysmem)
+@@ -6351,8 +6581,15 @@ int nvmtl_vk_buffer_migrate(nvk_buffer *b, int to_sysmem)
      }
      pvkFreeMemory(g_dev, (VkDeviceMemory)b->mem, NULL);
      g_alloc_bytes -= b->alloc; g_alloc_bytes += mr.size;
@@ -1663,7 +1812,18 @@ index 89ceca8..255ba6c 100644
      b->mem = nm; b->alloc = mr.size; b->sysmem = to_sysmem ? 1 : 0;
      return 0;
  }
-@@ -7139,7 +7331,11 @@ static int nvmtl_visibility_sum_init(void)
+@@ -6525,9 +6762,8 @@ int nvmtl_vk_image_read(nvk_queue *q, nvk_image *img, void *dst, size_t row_byte
+ // its buffer this way, from offset.
+ int nvmtl_vk_image_host_xfer(nvk_queue *q, nvk_image *img, nvk_buffer *hb, size_t offset, size_t row_bytes, int to_image)
+ {
++    if (!nvmtl_vk_image_host_xfer_ok(img, hb, offset, row_bytes)) return -1;
+     const size_t bpp = img->bpp ? img->bpp : 4;
+-    if (img->bw > 1 || img->bh > 1 || row_bytes % bpp || row_bytes / bpp < img->w || offset % 4 || offset % bpp
+-        || offset > hb->size || row_bytes * (img->h - 1) + (size_t)img->w * bpp > hb->size - offset) return -1;
+     if (!to_image) nvmtl_vk_image_upload_barrier(img);   // a readback must observe a pending async upload: finish it first
+     nvk_cmdbuf c; if (nvmtl_vk_cmd_begin(q, &c)) return -1;
+     VkImageSubresourceRange range = { nvmtl_barrier_aspect(img), 0, 1, 0, 1 };
+@@ -7139,7 +7375,11 @@ static int nvmtl_visibility_sum_init(void)
          VkComputePipelineCreateInfo pi = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0,
                                            stage, layout, VK_NULL_HANDLE, -1 };
          VkPipeline pipeline = VK_NULL_HANDLE;
@@ -1676,7 +1836,7 @@ index 89ceca8..255ba6c 100644
              nvmtl_pipe_cache_note_compile();
              g_visibility_sum_layout = layout; g_visibility_sum_pipeline = pipeline; rc = 0;
          } else {
-@@ -7690,9 +7886,21 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
+@@ -7690,9 +7930,21 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
          nvlog("buffer texture: bytesPerRow %zu cannot hold %u texels of %u B", row_pitch, w, bpp); return -1; }
      if (g_linmod && row_pitch % 32) {
          nvlog("buffer texture: bytesPerRow %zu is not a multiple of 32 B (the texture header's linear pitch unit)", row_pitch); return -1; }
@@ -1699,7 +1859,7 @@ index 89ceca8..255ba6c 100644
      VkFormatProperties fp; memset(&fp, 0, sizeof fp);
      if (gfp) gfp(g_pdev, (VkFormat)vkfmt, &fp);
      VkFormatFeatureFlags lf = fp.linearTilingFeatures;
-@@ -7718,7 +7926,7 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
+@@ -7718,7 +7970,7 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
      if (vp) {
          VkFormatProperties pp; memset(&pp, 0, sizeof pp); if (gfp) gfp(g_pdev, (VkFormat)vp, &pp);
          PFN_vkGetPhysicalDeviceImageFormatProperties2 gif = (PFN_vkGetPhysicalDeviceImageFormatProperties2)
@@ -1708,7 +1868,7 @@ index 89ceca8..255ba6c 100644
          VkImageFormatListCreateInfo qfl = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO, NULL, 2, vfl };
          VkPhysicalDeviceImageDrmFormatModifierInfoEXT qmi = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT, &qfl,
              0 , VK_SHARING_MODE_EXCLUSIVE, 0, NULL };
-@@ -7735,7 +7943,7 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
+@@ -7735,7 +7987,7 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
      out->layout = VK_IMAGE_LAYOUT_PREINITIALIZED;
      out->vkflags = (uint32_t)ici.flags; out->usage = (uint32_t)ici.usage; out->vpair = vp;
      if (!g_linmod) {
@@ -1717,45 +1877,17 @@ index 89ceca8..255ba6c 100644
          VkImageSubresource sr = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 }; VkSubresourceLayout got; memset(&got, 0, sizeof got);
          if (gsl) gsl(g_dev, (VkImage)out->img, &sr, &got);
          if (!gsl || got.rowPitch != row_pitch || got.offset) {
-@@ -7814,37 +8022,6 @@ static void pool_block_give(pool_block *blk, size_t off, size_t len)
-     if (off + len == blk->used) { blk->used = off; }
-     else {
-         for (uint32_t i = 0; i < blk->nfr; i++) {
--            if (blk->fr[i].off + blk->fr[i].len == off) { blk->fr[i].len += len; return; }
--            if (off + len == blk->fr[i].off) { blk->fr[i].off = off; blk->fr[i].len += len; return; }
--        }
--        if (blk->nfr == blk->cfr) { uint32_t c = blk->cfr ? blk->cfr * 2 : 64; pool_range *n = realloc(blk->fr, c * sizeof *n); if (!n) return; blk->fr = n; blk->cfr = c; }
--        blk->fr[blk->nfr].off = off; blk->fr[blk->nfr].len = len; blk->nfr++;
--    }
--    if (!blk->nlive) { blk->used = 0; blk->nfr = 0; }
--}
--static int vpool_on(void)
--{
--    static int on = -1;
--    if (on < 0) { const char *e = getenv("NVMTL_SHARED_POOL_VRAM"); on = !(e && e[0] == '0');
--        if (!on) nvlog("vk: small Shared buffers stay in the system-RAM pool (NVMTL_SHARED_POOL_VRAM=0)"); }
--    return on && bar1_on() && !g_bar1_off;
--}
--static const char *pool_place_why(int vram)
--{
--    if (vram) return "VRAM through BAR1";
--    if (!bar1_on()) return "system RAM BY DESIGN - Shared is system RAM on a discrete GPU (batch 56; NVMTL_SHARED_VRAM=1 opts in)";
--    if (g_bar1_off) return "system RAM - BAR1 REFUSED a VRAM block for this process (see the REFUSED line above)";
--    return "system RAM - this request never asked for VRAM (host_visible != 2)";
--}
--static int vpool_heap_create(size_t size, nvk_heap *out)
--{
--    static uint32_t bits;
--    memset(out, 0, sizeof *out);
--    if (!bits) {
--        VkBufferCreateInfo bci = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, 4096, NVMTL_BUFFER_USAGE, VK_SHARING_MODE_EXCLUSIVE, 0, NULL };
--        VkBuffer pb = VK_NULL_HANDLE;
--        if (pvkCreateBuffer(g_dev, &bci, NULL, &pb) != VK_SUCCESS) return -1;
--        VkMemoryRequirements mr; pvkGetBufferMemoryRequirements(g_dev, pb, &mr); pvkDestroyBuffer(g_dev, pb, NULL);
-         bits = mr.memoryTypeBits; if (!bits) return -1;
-     }
-     int bt = bar1_memtype(bits, size); if (bt < 0) return -1;
-@@ -7954,7 +8131,9 @@ static int nvmtl_vk_image_create_typed_placed_lifetime_body(uint32_t w, uint32_t
+@@ -7758,6 +8010,9 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
+     if (mr.size > b->size - offset)
+         nvlog("buffer texture: image size %llu runs %llu B past the buffer's %zu at offset %zu (the tail of the last row, never addressed)",
+               (unsigned long long)mr.size, (unsigned long long)(mr.size - (b->size - offset)), b->size, offset);
++    if (mr.size > b->size - offset)
++        nvlog("buffer texture: image size %llu runs %llu B past the buffer's %zu at offset %zu (the tail of the last row, never addressed)",
++              (unsigned long long)mr.size, (unsigned long long)(mr.size - (b->size - offset)), b->size, offset);
+     VKCK(pvkBindImageMemory(g_dev, (VkImage)out->img, (VkDeviceMemory)b->mem, at), "vkBindImageMemory(buffer texture)");
+     out->mem = b->mem; out->placed = 1; out->alloc = 0;
+     VkComponentMapping swz = a8 ? (VkComponentMapping){ VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_R }
+@@ -7954,7 +8209,9 @@ static int nvmtl_vk_image_create_typed_placed_lifetime_body(uint32_t w, uint32_t
          (out->bw > 1 ? 0 : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
          VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | (storage ? VK_IMAGE_USAGE_STORAGE_BIT : 0),
          VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED };
@@ -1767,7 +1899,7 @@ index 89ceca8..255ba6c 100644
      VkMemoryRequirements mr; pvkGetImageMemoryRequirements(g_dev, out->img, &mr);
      if (placed_ok(&mr, heap, offset, "placed image")) { pvkDestroyImage(g_dev, (VkImage)out->img, NULL); memset(out, 0, sizeof *out); return -1; }
 diff --git a/src/nmplugin/nvmtl_vk.h b/src/nmplugin/nvmtl_vk.h
-index e634db9..5c6929f 100644
+index e634db9..3d461f5 100644
 --- a/src/nmplugin/nvmtl_vk.h
 +++ b/src/nmplugin/nvmtl_vk.h
 @@ -8,7 +8,7 @@
@@ -1787,7 +1919,16 @@ index e634db9..5c6929f 100644
  void nvmtl_vk_bindless_rewrite(uint32_t slot, void *view);
  void nvmtl_vk_res2_stats(uint64_t out[5]);
  int nvmtl_vk_buffer_migrate(nvk_buffer *b, int to_sysmem);
-@@ -213,6 +214,7 @@ extern void (*nvmtl_pre_release_hook)(void *);
+@@ -208,11 +209,16 @@ void nvmtl_vk_gsub_nvk_stats(uint64_t *out, unsigned n);
+ int nvmtl_vk_pre_open(void);
+ int nvmtl_vk_pre_copy(nvk_buffer *src, size_t srcOff, nvk_buffer *dst, size_t dstOff, size_t size);
+ int nvmtl_vk_pre_fill(nvk_buffer *b, size_t offset, size_t size, uint32_t word);
++int nvmtl_vk_surfin_prologue_on(void);
++int nvmtl_vk_image_host_xfer_ok(const nvk_image *img, const nvk_buffer *hb, size_t offset, size_t row_bytes);
++void nvmtl_vk_image_mark_sampled_layout(nvk_image *img);
++int nvmtl_vk_pre_copy_buf_to_img(nvk_image *img, nvk_buffer *hb, size_t offset, size_t row_bytes);
+ void nvmtl_vk_pre_hold(void *retained);
+ extern void (*nvmtl_pre_release_hook)(void *);
  extern void (*nvmtl_pre_submit_hook)(void);
  int  nvmtl_vk_image_read(nvk_queue *q, nvk_image *img, void *dst, size_t row_bytes);
  int  nvmtl_vk_image_host_xfer(nvk_queue *q, nvk_image *img, nvk_buffer *hb, size_t offset, size_t row_bytes, int to_image);
@@ -1795,7 +1936,7 @@ index e634db9..5c6929f 100644
  int  nvmtl_vk_image_write(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes);
  int  nvmtl_vk_copy_buffer(nvk_queue *q, nvk_buffer *src, size_t srcOff, nvk_buffer *dst, size_t dstOff, size_t size);
  int  nvmtl_vk_image_create_mips(uint32_t w, uint32_t h, int bgra, uint32_t mips, nvk_image *out);
-@@ -308,6 +310,7 @@ void nvmtl_vk_queue_destroy(nvk_queue *q);
+@@ -308,6 +314,7 @@ void nvmtl_vk_queue_destroy(nvk_queue *q);
  size_t nvmtl_vk_allocated_bytes(void);
  uint64_t nvmtl_vk_buffer_address(nvk_buffer *b);
  
