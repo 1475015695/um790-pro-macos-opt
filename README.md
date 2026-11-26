@@ -48,10 +48,13 @@ Minisforum UM790 Pro Hackintosh 专项性能优化合集，聚焦 **AMD Zen 4 �
    - **按需 `MUTABLE_FORMAT_BIT` + `VkImageFormatListCreateInfo`（默认开启，`NVMTL_NO_DCC_OPT=1` 关闭）**：在 `NVMTLDevice.newTextureWithDescriptor:` 与 `nvmtl_vk_image_mutable()` 中根据 `MTLTextureUsagePixelFormatView` 按需决定可变格式标记；普通非 `ShaderWrite` 颜色/MSAA 目标若仅有 sRGB/线性配对则附加 `VkImageFormatListCreateInfo` 并记录 `vpair`，其余单格式渲染目标不再无条件加 `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`，解锁 Radeon 780M RADV GFX11 DCC 带宽压缩。
    - **AMD 默认关闭 Framebuffer Fetch（`NVMTL_FBFETCH=1` 按需开启）**：避免 Chrome WebGL 等普通应用在所有颜色附件上强制附加 `VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT`、`VK_IMAGE_LAYOUT_GENERAL` 与 subpass 自依赖屏障。
    - **对所有 AMD 进程开放 `NVMTL_RP_LIGHT` 轻量 RenderPass 屏障**：移除此前 `nvmtl_rp_light()` 的仅限 `WindowServer` 限制，省去每个 RenderPass 结束时冗余的 `ALL_COMMANDS` 全管线排空与缓存刷新（统一由下一 Pass 入口及 submit 结尾宿主可见屏障保证一致性）。
-   - **支持 `nvrm610.conf` 配置 `RADV_` 并统一提升每进程显存软上限至 `512 MiB`**：`nvmtl_amd_vram_cap()` 从 `256/128 MiB` 提升至统一 **`512 MiB`**，大幅减少浏览器/桌面合成纹理被提前溢出到系统内存路径（注：实测发现 `RADV_PERFTEST=nggc` 在 Chrome 复杂管线下会触发 `radv_CreateGraphicsPipelines + 8009` 空指针崩溃，故**保持默认关闭**，仅保留通过 `nvrm610.conf` 显式配置 `RADV_` 变量的能力）。
-8. **`surface-in prologue` 异步合批上传与扩大 IOSurface 缓存池（消除视频播放与桌面过渡掉帧）**：
+   - **支持 `nvrm610.conf` 配置 `RADV_` 与按进程区分显存软上限（`WindowServer 384 MiB / 其余进程 256 MiB`）**：兼顾 `RADV` 512 MiB `VRAM` 堆与公共 `GTT` 预算，防止多 GPU 进程叠加触发 `-2` (`VK_ERROR_OUT_OF_DEVICE_MEMORY`)（注：实测发现 `RADV_PERFTEST=nggc` 在 Chrome 复杂管线下会触发 `radv_CreateGraphicsPipelines + 8009` 空指针崩溃，故**保持默认关闭**，仅保留通过 `nvrm610.conf` 显式配置 `RADV_` 变量的能力）。
+8. **`surface-in prologue` 异步合批上传与压力按需回收缓存池（消除视频播放与桌面缩放掉帧）**：
    - **非 256B 对齐纹理上传改异步合批（默认开启，`NVMTL_SURFIN_PROLOGUE=0` 可关闭）**：针对 1080p HEVC/NV12 等行宽非 `256` 倍数（走 `_hostCopy`）的 `IOSurface` 与 buffer 纹理，将 `nvmtlSurfaceInDefer:YES` 中的上传操作（`nvmtl_vk_pre_copy_buf_to_img()`）延后并合并至 `[cb commit]` 的 pre-submit prologue 中随渲染命令一次提交，彻底消除每帧同步 `vkWaitForFences` 卡死 GPU 主线程的问题（`1920×1080` 非 256B 对齐实测：Encode P50 `0.211 → 0.095 ms` / **-55.0%**，Total P95 `1.586 → 0.454 ms` / **-71.4%**，吞吐 `+30.5%`）。
-   - **扩大 `nvmtl_surface_keep` 空闲缓存池**：在 `src/nmplugin/NVMTLDevice.m` 中将空闲保留上限从 `48 条目 / 192 MiB / 2s TTL` 提升至 **`128 条目 / 384 MiB / 4s TTL`**，防止 `WindowServer` 在后台视频解码 + 系统过渡动画并发时频繁驱逐并重新通过内核 `acd_kext_bo_import_host` / `acd_kext_bo_create` 映射 `IOSurface`。
+   - **`nvmtl_surface_keep` 异步回收与 `VRAM/OOM (-2)` 压力联动清空**：将空闲保留上限调整为 **`96 条目 / 160 MiB 总量 / 96 MiB 纯 VRAM / 1500 ms TTL`**，常规淘汰通过后台 `QOS_CLASS_UTILITY` 串行队列异步释放（将 `acd_kext_gem_va` 解映射剥离出 `WindowServer` 主线程）；当触发软显存墙或实际分配遇到 `-2` (`VK_ERROR_OUT_OF_DEVICE_MEMORY`) 时，通过 `nvmtl_surface_keep_reclaim_hook` 同步排空空闲缓存并立即重试分配，消除 `3840×2048` 缩放帧溢出/失败。
+9. **修复 CoreAnimation 描述符掩码回退与 `120 Hz` 采样器 JSON 序列化开销**：
+   - **`nvmtl_spirv_bmask()` 正确跳过 `DescriptorSet 3` (`NVMTL_FETCH_SET`)**：CoreAnimation 合成着色器会声明 `[[color(n)]]` 绑定（位于 `set 3, binding 192..199`），此前仅排除了 `set 2`（bindless 堆），导致 `gmask_ok` 失效并退化为每次 Draw 重写/拷贝全部 `386` 个描述符；修复后恢复精细描述符掩码与动态 UBO 复用，并将 `nvmtl_snapshot_set_md()` 主循环改为 `__builtin_ctzll` 位扫描、提升 `was == 1` 脏描述符增量拷贝生效率。
+   - **全局共享 `_pixelSamplerKey` 规范化缓存**：在 `NVMTLObjects.m` 新增 32 槽 `os_unfair_lock` 保护的全局键缓存（`nvmtl_pixel_sampler_key_for()`），消除 `CoreDisplay::DisplayPipe::RunFullDisplayPipe` 每帧新建临时编码器导致的 `120 Hz` `NSJSONSerialization` + `CFSortIndexes` 开销。
 
 ### 3. `um790-bench/`：零重启稳定性、CPU 与 Metal→Vulkan 压测审计套件
 - 原生 Metal/CPU 压测核心 [`src/metal_stress.m`](um790-bench/src/metal_stress.m) + 编排 CLI [`um790bench.py`](um790-bench/um790bench.py)。
@@ -95,7 +98,7 @@ Minisforum UM790 Pro Hackintosh 专项性能优化合集，聚焦 **AMD Zen 4 �
 | **单项：`NVMTL_RP_LIGHT=1`** (`150` 帧) | `NVMTL_RP_LIGHT=0` | `NVMTL_RP_LIGHT=1` | **`169.0 → 173.9 FPS (+2.9%)` \| P50 `5.143 → 4.814 ms (-6.4%)` \| Encode P50 `-14.7%`** |
 | **单项：`surface-in prologue` (`1920×1080 bpr=1920`)** (`120` 帧) | `NVMTL_SURFIN_PROLOGUE=0` | 默认开启 | **`2707.6 → 3533.1 FPS (+30.5%)` \| Enc P50 `0.211 → 0.095 ms (-55.0%)` \| Tot P95 `1.586 → 0.454 ms (-71.4%)`** |
 
-> 完整新默认综合基准（`20261126-205455-after-surfin-prologue`）：`Composite 171.6 FPS`（`<8.33ms` 达 **91.7%**，`Enc P50/P95 0.603/1.360 ms`，`Tot P50/P95 5.445/8.556 ms`），`VRAM Stress 320 MiB + 24 管线 398.7 ms`，`hang_kills / gpu_timeouts / iop_fail / new_crashes / -1000158000 / alloc_refused` 全部为 **`0`**。
+> 最新完整新默认综合基准（`20261126-214139-after-ws-opt2`）：`Composite 237.5 FPS`（较上一版 `171.6 FPS` 再提升 **+38.4%**，`<8.33ms` 达标率 **`99.2%`**，`Enc P50/P95 0.438/1.127 ms`，`Tot P50/P95 3.704/6.767 ms`），`VRAM Stress 320 MiB + 24 管线 271.5 ms`（**-31.9%**），`hang_kills / gpu_timeouts / iop_fail / new_crashes / -1000158000 / alloc_refused / FAILED` 全部为 **`0`**。
 
 ### `WindowServer` / `NVMTLDriver` 运行日志改善
 - `-1000158000` 线性缓冲纹理创建报错：`98,304 → 0`
