@@ -44,6 +44,11 @@ Minisforum UM790 Pro Hackintosh 专项性能优化合集，聚焦 **AMD Zen 4 �
    - 在 `nvmtl_vk_image_create_buffer_alias_lifetime_body` 中对 AMD 非 256B 对齐行距的线性纹理直接静默快速失败，并原子缓存 Vulkan 格式属性查询函数指针。
 6. **过滤 AIR 空内联汇编内存屏障（修复 Chromium / Electron UI 渐变文字隐身）**：
    - 在转译前通过 `nvmtl_air_strip_noop_asm()` 安全剔除 LLVM 生成的空内联汇编屏障 `[tail|musttail|notail] call void asm sideeffect "", ""()`（`libnvmtl_translate` 会因 `opcode=tail` / `opcode=call` 拒绝编译导致 Skia 文本渐变着色器缺失、`draw with no pipeline set`），实测修复 `aircache` 中 **30 / 30** 失败的 `@main0` 着色器。
+7. **解锁 RADV GFX11 DCC 压缩与减少 WebGL / RenderPass 管线同步阻塞**：
+   - **按需 `MUTABLE_FORMAT_BIT` + `VkImageFormatListCreateInfo`（默认开启，`NVMTL_NO_DCC_OPT=1` 关闭）**：在 `NVMTLDevice.newTextureWithDescriptor:` 与 `nvmtl_vk_image_mutable()` 中根据 `MTLTextureUsagePixelFormatView` 按需决定可变格式标记；普通非 `ShaderWrite` 颜色/MSAA 目标若仅有 sRGB/线性配对则附加 `VkImageFormatListCreateInfo` 并记录 `vpair`，其余单格式渲染目标不再无条件加 `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`，解锁 Radeon 780M RADV GFX11 DCC 带宽压缩。
+   - **AMD 默认关闭 Framebuffer Fetch（`NVMTL_FBFETCH=1` 按需开启）**：避免 Chrome WebGL 等普通应用在所有颜色附件上强制附加 `VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT`、`VK_IMAGE_LAYOUT_GENERAL` 与 subpass 自依赖屏障。
+   - **对所有 AMD 进程开放 `NVMTL_RP_LIGHT` 轻量 RenderPass 屏障**：移除此前 `nvmtl_rp_light()` 的仅限 `WindowServer` 限制，省去每个 RenderPass 结束时冗余的 `ALL_COMMANDS` 全管线排空与缓存刷新（统一由下一 Pass 入口及 submit 结尾宿主可见屏障保证一致性）。
+   - **AMD 默认启用 `RADV_PERFTEST=nggc` 与放宽每进程显存软上限至 `512 MiB`**：`nvmtl_vk_initialize()` 在载入 RADV ICD 前自动启用 `nggc`（`NVMTL_NO_RADV_NGGC=1` 可关），`nvrm610.conf` 允许配置 `RADV_` 变量；`nvmtl_amd_vram_cap()` 从 `256/128 MiB` 提升至统一 **`512 MiB`**，大幅减少浏览器/桌面合成纹理被提前溢出到系统内存路径。
 
 ### 3. `um790-bench/`：零重启稳定性、CPU 与 Metal→Vulkan 压测审计套件
 - 原生 Metal/CPU 压测核心 [`src/metal_stress.m`](um790-bench/src/metal_stress.m) + 编排 CLI [`um790bench.py`](um790-bench/um790bench.py)。
@@ -76,6 +81,17 @@ Minisforum UM790 Pro Hackintosh 专项性能优化合集，聚焦 **AMD Zen 4 �
 | `vram_stress.wall_ms` (320 MiB + 24 条管线) | `3088.96 ms` | **`286.04 ms` (-90.7%)** | **`283.07 ms` (-90.8%，比 `pre-res2-pcache` 的 `333.99 ms` 再降 15.2%)** |
 | `composite.cpu_pct` | `35.7%` | `31.5%` | **`29.8%`** |
 | 稳定性审计 (`hang / timeout / iop_fail / new_crashes`) | `0 / 0 / 0 / 0` | `0 / 0 / 0 / 0` | **`0 / 0 / 0 / 0`** |
+
+### `NVMTLDriver` GFX11 渲染管线优化隔离 A/B 对比（`um790bench ab`，150–180 帧）
+| 对比项 | 基线 (`A`) | 优化 (`B`) | 实测变化 (`Avg FPS` / `Total P50` / `Total P95`) |
+| :--- | :--- | :--- | :--- |
+| **全部新默认 vs 优化前** (`180` 帧) | `FBFETCH=1, RP_LIGHT=0, CAP=128MB, NO_DCC_OPT=1, RADV_PERFTEST=` | 默认全开 | **`135.4 → 173.8 FPS (+28.4%)` \| P50 `6.292 → 4.725 ms (-24.9%)` \| P95 `10.876 → 9.503 ms (-12.6%)`** |
+| **单项：GFX11 DCC 格式表优化** (`150` 帧) | `NVMTL_NO_DCC_OPT=1` | 默认开启 | **`150.0 → 191.4 FPS (+27.6%)` \| P50 `5.386 → 4.247 ms (-21.1%)` \| P95 `11.939 → 8.556 ms (-28.3%)`** |
+| **单项：AMD 默认关闭 Framebuffer Fetch** (`150` 帧) | 此前默认开启 | `NVMTL_NO_FBFETCH=1` | **`188.0 → 241.1 FPS (+28.2%)` \| P50 `4.587 → 3.710 ms (-19.1%)` \| P95 `8.829 → 5.536 ms (-37.3%)`** |
+| **单项：`RADV_PERFTEST=nggc`** (`150` 帧) | `NVMTL_NO_FBFETCH=1` | `+ nggc` | **`149.5 → 163.0 FPS (+9.0%)` \| P50 `6.428 → 5.705 ms (-11.2%)` \| P95 `10.740 → 9.254 ms (-13.8%)`** |
+| **单项：`NVMTL_RP_LIGHT=1`** (`150` 帧) | `NVMTL_RP_LIGHT=0` | `NVMTL_RP_LIGHT=1` | **`169.0 → 173.9 FPS (+2.9%)` \| P50 `5.143 → 4.814 ms (-6.4%)` \| Encode P50 `-14.7%`** |
+
+> 完整新默认综合基准（`20261126-201002-after-dcc-rp-nggc`）：`Composite 175.0 FPS`（`<8.33ms` 达 **90.8%**，`Total P50 4.519 ms`），`VRAM Stress 320 MiB + 24 管线 290.4 ms`，`hang_kills / gpu_timeouts / iop_fail / new_crashes / -1000158000 / alloc_refused` 全部为 **`0`**。
 
 ### `WindowServer` / `NVMTLDriver` 运行日志改善
 - `-1000158000` 线性缓冲纹理创建报错：`98,304 → 0`
