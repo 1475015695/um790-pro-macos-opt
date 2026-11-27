@@ -28,7 +28,7 @@ Minisforum UM790 Pro Hackintosh 专项性能优化合集，聚焦 **AMD Zen 4 �
     - `-um790cppcoff`：仅禁用 CPPC 写入，保留风扇控制功能。
 
 ### 2. `patches/nvmtl-um790pro-optimizations.patch`：`NVMTLDriver` Metal→Vulkan 转译与显存调度优化
-基于 NullMoth / `nullarc` (`a209038`) 针对 Radeon 780M APU 与 macOS 桌面合成特征的补丁，覆盖以下 5 项核心改进：
+基于 NullMoth / `nullarc` (`a209038`) 针对 Radeon 780M APU 与 macOS 桌面合成特征的补丁，覆盖以下 10 项核心改进：
 1. **消除 AMD APU `res2` 显存抖动与分配线程卡顿**：
    - 修复独显默认的 `1024 MiB` headroom + `256 MiB` margin（`1356 MiB` target）与 AMD `128 MiB` 软上限冲突引发的 DDR5↔DDR5 纹理频繁迁出/迁回（此前 10 分钟内高达 30.8 GB 搬运与 16–30 ms 主线程阻塞）。
    - AMD (`0x1002`) 下默认关闭 `res2` LRU 页面搬运（保留 `res1` purgeable 显存回收，可用 `NVMTL_NO_RES2=0` 随时手动开启）；将 `WindowServer` 默认 `nvmtl_amd_vram_cap()` 提升至 `256 MiB`（其他进程维持 `128 MiB`），`headroom` 按容量自适应为 `8–32 MiB`。
@@ -55,6 +55,10 @@ Minisforum UM790 Pro Hackintosh 专项性能优化合集，聚焦 **AMD Zen 4 �
 9. **修复 CoreAnimation 描述符掩码回退与 `120 Hz` 采样器 JSON 序列化开销**：
    - **`nvmtl_spirv_bmask()` 正确跳过 `DescriptorSet 3` (`NVMTL_FETCH_SET`)**：CoreAnimation 合成着色器会声明 `[[color(n)]]` 绑定（位于 `set 3, binding 192..199`），此前仅排除了 `set 2`（bindless 堆），导致 `gmask_ok` 失效并退化为每次 Draw 重写/拷贝全部 `386` 个描述符；修复后恢复精细描述符掩码与动态 UBO 复用，并将 `nvmtl_snapshot_set_md()` 主循环改为 `__builtin_ctzll` 位扫描、提升 `was == 1` 脏描述符增量拷贝生效率。
    - **全局共享 `_pixelSamplerKey` 规范化缓存**：在 `NVMTLObjects.m` 新增 32 槽 `os_unfair_lock` 保护的全局键缓存（`nvmtl_pixel_sampler_key_for()`），消除 `CoreDisplay::DisplayPipe::RunFullDisplayPipe` 每帧新建临时编码器导致的 `120 Hz` `NSJSONSerialization` + `CFSortIndexes` 开销。
+10. **修复 Chrome 直播全屏切换触发 GPU 进程重载（OOM / RADV 空指针崩溃 / `DRM_LINEAR` 格式视图）**：
+    - **提升 AMD 软显存上限至 `1024 MiB`**：将 `nvmtl_amd_vram_cap()` 默认值从 `384/256 MiB` 提升至 `1024 MiB`（匹配内核 `kHiTotal = 1536 MiB` 专用显存池，仍支持 `NVMTL_AMD_VRAM_CAP_MB` 覆盖），避免 Chrome 全屏 4K sRGB/MSAA 渲染目标与 1080p NV12 视频帧挤爆仅 `512 MiB` 的共享 `GTT` 池。
+    - **统一压力回收链路与 `64 MiB` AMD 缓冲驻留上限**：新增 `nvmtl_bpark_budget()`（AMD `64 MiB`）与 `nvmtl_vk_pressure_reclaim()`（按需联动清空 `g_bpark`、空 `g_pool` 块、`g_keep` 命令池与 VA 页以及 `nvmtl_surface_keep`），接入图像/缓冲/堆/描述符/Fence 分配与 `vkQueueSubmit` OOM 一次重试路径；同时在 `vkCreateGraphicsPipelines` / `vkCreateComputePipelines` 前执行 `nvmtl_vk_pre_pipeline_reclaim()`，防止 BO/显存紧张时 RADV `_radv_alloc_shader_memory` 返回空指针引发 `radv_CreateGraphicsPipelines + 8009` / `radv_compute_pipeline_create + 1132` `SIGSEGV`。
+    - **`DRM_LINEAR` 零拷贝格式视图与诊断增强**：在 `NVMTLDevice.m` 将 `MTLTextureUsageUnknown` 视为允许格式视图，并在 `NVMTLObjects.m` 新增 `nvmtl_host_alias_format_view()`，当 RADV 拒绝 `DRM_FORMAT_MOD_LINEAR + MUTABLE_FORMAT_BIT` (`-11`) 时直接复用 `_hostBuf` 创建目标单格式别名图像（支持 `BGRA8Unorm → BGRA8Unorm_sRGB` 零拷贝视图）；在 `NVMTLEventSync.m` / `nvmtl_vk.c` 的事件段错误中补充 `stage` 与 `VkResult` 便于沙盒进程排障。
 
 ### 3. `um790-bench/`：零重启稳定性、CPU 与 Metal→Vulkan 压测审计套件
 - 原生 Metal/CPU 压测核心 [`src/metal_stress.m`](um790-bench/src/metal_stress.m) + 编排 CLI [`um790bench.py`](um790-bench/um790bench.py)。
@@ -98,7 +102,7 @@ Minisforum UM790 Pro Hackintosh 专项性能优化合集，聚焦 **AMD Zen 4 �
 | **单项：`NVMTL_RP_LIGHT=1`** (`150` 帧) | `NVMTL_RP_LIGHT=0` | `NVMTL_RP_LIGHT=1` | **`169.0 → 173.9 FPS (+2.9%)` \| P50 `5.143 → 4.814 ms (-6.4%)` \| Encode P50 `-14.7%`** |
 | **单项：`surface-in prologue` (`1920×1080 bpr=1920`)** (`120` 帧) | `NVMTL_SURFIN_PROLOGUE=0` | 默认开启 | **`2707.6 → 3533.1 FPS (+30.5%)` \| Enc P50 `0.211 → 0.095 ms (-55.0%)` \| Tot P95 `1.586 → 0.454 ms (-71.4%)`** |
 
-> 最新完整新默认综合基准（`20261126-214139-after-ws-opt2`）：`Composite 237.5 FPS`（较上一版 `171.6 FPS` 再提升 **+38.4%**，`<8.33ms` 达标率 **`99.2%`**，`Enc P50/P95 0.438/1.127 ms`，`Tot P50/P95 3.704/6.767 ms`），`VRAM Stress 320 MiB + 24 管线 271.5 ms`（**-31.9%**），`hang_kills / gpu_timeouts / iop_fail / new_crashes / -1000158000 / alloc_refused / FAILED` 全部为 **`0`**。
+> 最新完整新默认综合基准（`20261126-221502-after-chrome-opt`）：`Composite 233.2 FPS`（`<8.33ms` 达标率 **`99.2%`**，`Enc P50/P95 0.484/1.141 ms`，`Tot P50/P95 3.867/5.686 ms`），`VRAM Stress 320 MiB + 24 管线 320.8 ms`，`hang_kills / gpu_timeouts / iop_fail / new_crashes / -1000158000 / alloc_refused / FAILED` 全部为 **`0`**（前一版 `20261126-214139-after-ws-opt2`：`Composite 237.5 FPS`，`VRAM Stress 271.5 ms`）。
 
 ### `WindowServer` / `NVMTLDriver` 运行日志改善
 - `-1000158000` 线性缓冲纹理创建报错：`98,304 → 0`
