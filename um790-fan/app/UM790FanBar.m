@@ -33,6 +33,22 @@ static void logLine(NSString *fmt, ...) {
 @property (strong, nonatomic) NSMenuItem *cppcPerfItem;
 @property (strong, nonatomic) NSMenuItem *cppcBalItem;
 @property (strong, nonatomic) NSMenuItem *cppcEcoItem;
+@property (strong, nonatomic) NSMenuItem *watchToggleItem;
+@property (strong, nonatomic) NSMenuItem *watchStatusItem;
+@property (strong, nonatomic) NSMenuItem *watchParent;
+@property (strong, nonatomic) NSMenu *watchMenu;
+@property (strong, nonatomic) NSMenuItem *watchNotifyItem;
+@property (strong, nonatomic) NSMenuItem *watchEventsAnchorSep;
+@property (strong, nonatomic) NSMutableArray<NSMenuItem *> *watchEventItems;
+
+@property (nonatomic) BOOL watchEnabled;
+@property (nonatomic) BOOL watchRunning;
+@property (nonatomic) BOOL watchNotify;
+@property (nonatomic) BOOL watchBusy;
+@property (nonatomic) NSInteger watchUnreadCritical;
+@property (nonatomic) NSInteger watchUnreadWarn;
+@property (copy, nonatomic) NSDictionary *watchMetrics;
+@property (copy, nonatomic) NSArray<NSDictionary *> *watchRecentEvents;
 
 @property (nonatomic) io_connect_t conn;
 @property (nonatomic) BOOL hasStatus;
@@ -397,6 +413,52 @@ static NSString *modeLabel(uint8_t mode, int16_t curCode, uint8_t owned, uint8_t
     [_menu addItem:_cpuCppcParent];
 
     [_menu addItem:[NSMenuItem separatorItem]];
+
+    _watchToggleItem = [[NSMenuItem alloc] initWithTitle:@"驱动与性能后台检测"
+                                                  action:@selector(onToggleWatch:)
+                                           keyEquivalent:@""];
+    _watchToggleItem.target = self;
+    [_menu addItem:_watchToggleItem];
+
+    _watchStatusItem = [[NSMenuItem alloc] initWithTitle:@"检测状态: 读取中..."
+                                                  action:nil
+                                           keyEquivalent:@""];
+    _watchStatusItem.enabled = NO;
+    [_menu addItem:_watchStatusItem];
+
+    _watchMenu = [[NSMenu alloc] initWithTitle:@"后台检测详情与选项"];
+    _watchNotifyItem = [[NSMenuItem alloc] initWithTitle:@"严重异常桌面弹窗通知"
+                                                  action:@selector(onToggleWatchNotify:)
+                                           keyEquivalent:@""];
+    _watchNotifyItem.target = self;
+    [_watchMenu addItem:_watchNotifyItem];
+
+    _watchEventsAnchorSep = [NSMenuItem separatorItem];
+    [_watchMenu addItem:_watchEventsAnchorSep];
+    _watchEventItems = [[NSMutableArray alloc] init];
+
+    [_watchMenu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *watchRepItem = [[NSMenuItem alloc] initWithTitle:@"生成并查看诊断报告"
+                                                          action:@selector(onOpenWatchReport:)
+                                                   keyEquivalent:@""];
+    watchRepItem.target = self;
+    NSMenuItem *watchAckItem = [[NSMenuItem alloc] initWithTitle:@"清空未读告警角标"
+                                                          action:@selector(onAckWatch:)
+                                                   keyEquivalent:@""];
+    watchAckItem.target = self;
+    NSMenuItem *watchLogsItem = [[NSMenuItem alloc] initWithTitle:@"打开检测日志目录"
+                                                           action:@selector(onOpenWatchLogs:)
+                                                    keyEquivalent:@""];
+    watchLogsItem.target = self;
+    [_watchMenu addItem:watchRepItem];
+    [_watchMenu addItem:watchAckItem];
+    [_watchMenu addItem:watchLogsItem];
+
+    _watchParent = [[NSMenuItem alloc] initWithTitle:@"后台检测详情与选项" action:nil keyEquivalent:@""];
+    _watchParent.submenu = _watchMenu;
+    [_menu addItem:_watchParent];
+
+    [_menu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *quitFw = [[NSMenuItem alloc] initWithTitle:@"退出并恢复原厂固件"
                                                    action:@selector(onQuitFirmware:)
                                             keyEquivalent:@""];
@@ -411,7 +473,148 @@ static NSString *modeLabel(uint8_t mode, int16_t curCode, uint8_t owned, uint8_t
     _statusItem.menu = _menu;
 }
 
+- (void)refreshWatchState {
+    NSString *cfgPath = [@"~/Library/Application Support/UM790Watch/config.json" stringByExpandingTildeInPath];
+    BOOL enabled = NO;
+    BOOL notify = YES;
+    NSData *cfgData = [NSData dataWithContentsOfFile:cfgPath];
+    if (cfgData) {
+        id obj = [NSJSONSerialization JSONObjectWithData:cfgData options:0 error:nil];
+        if ([obj isKindOfClass:[NSDictionary class]]) {
+            if ([obj[@"enabled"] respondsToSelector:@selector(boolValue)]) {
+                enabled = [obj[@"enabled"] boolValue];
+            }
+            if ([obj[@"notify"] respondsToSelector:@selector(boolValue)]) {
+                notify = [obj[@"notify"] boolValue];
+            }
+        }
+    }
+
+    BOOL running = NO;
+    NSInteger unreadCrit = 0;
+    NSInteger unreadWarn = 0;
+    NSDictionary *metrics = nil;
+    NSArray *recent = nil;
+
+    NSData *stData = [NSData dataWithContentsOfFile:@"/tmp/um790watch-status.json"];
+    if (stData) {
+        id stObj = [NSJSONSerialization JSONObjectWithData:stData options:0 error:nil];
+        if ([stObj isKindOfClass:[NSDictionary class]]) {
+            pid_t pid = (pid_t)([stObj[@"pid"] respondsToSelector:@selector(intValue)] ? [stObj[@"pid"] intValue] : 0);
+            BOOL stRun = [stObj[@"running"] respondsToSelector:@selector(boolValue)] && [stObj[@"running"] boolValue];
+            BOOL pidAlive = (pid > 0 && kill(pid, 0) == 0);
+            running = (stRun && pidAlive);
+            if ([stObj[@"unread_critical"] respondsToSelector:@selector(integerValue)]) {
+                unreadCrit = [stObj[@"unread_critical"] integerValue];
+            }
+            if ([stObj[@"unread_warn"] respondsToSelector:@selector(integerValue)]) {
+                unreadWarn = [stObj[@"unread_warn"] integerValue];
+            }
+            if ([stObj[@"metrics"] isKindOfClass:[NSDictionary class]]) {
+                metrics = stObj[@"metrics"];
+            }
+            if ([stObj[@"recent_events"] isKindOfClass:[NSArray class]]) {
+                recent = stObj[@"recent_events"];
+            }
+        }
+    }
+
+    _watchEnabled = enabled;
+    _watchRunning = running;
+    _watchNotify = notify;
+    _watchUnreadCritical = unreadCrit;
+    _watchUnreadWarn = unreadWarn;
+    _watchMetrics = metrics ?: @{};
+    _watchRecentEvents = recent ?: @[];
+}
+
+- (void)updateWatchUI {
+    _watchToggleItem.enabled = !_watchBusy;
+    _watchToggleItem.state = (_watchEnabled && _watchRunning) ? NSControlStateValueOn : NSControlStateValueOff;
+    _watchNotifyItem.state = _watchNotify ? NSControlStateValueOn : NSControlStateValueOff;
+
+    if (!_watchEnabled && !_watchRunning) {
+        _watchStatusItem.title = @"检测状态: 已关闭";
+    } else if (!_watchRunning) {
+        _watchStatusItem.title = @"检测状态: 已启用 (等待后台启动)";
+    } else if (_watchUnreadCritical > 0 || _watchUnreadWarn > 0) {
+        _watchStatusItem.title = [NSString stringWithFormat:@"检测状态: 运行中 · %ld 严重 / %ld 警告",
+                                  (long)_watchUnreadCritical, (long)_watchUnreadWarn];
+    } else {
+        id wsObj = _watchMetrics[@"ws_cpu_pct"];
+        id fpsObj = _watchMetrics[@"active_fps"];
+        if ([wsObj isKindOfClass:[NSNumber class]] && [fpsObj isKindOfClass:[NSNumber class]]) {
+            _watchStatusItem.title = [NSString stringWithFormat:@"检测状态: 运行中 · 正常 (WS %.1f%% · %.0f FPS)",
+                                      [wsObj doubleValue], [fpsObj doubleValue]];
+        } else {
+            _watchStatusItem.title = @"检测状态: 运行中 · 正常";
+        }
+    }
+
+    for (NSMenuItem *it in _watchEventItems) {
+        [_watchMenu removeItem:it];
+    }
+    [_watchEventItems removeAllObjects];
+
+    NSInteger insertIdx = [_watchMenu indexOfItem:_watchEventsAnchorSep] + 1;
+    if (_watchRecentEvents.count == 0) {
+        NSMenuItem *emptyIt = [[NSMenuItem alloc] initWithTitle:@"暂无异常记录" action:nil keyEquivalent:@""];
+        emptyIt.enabled = NO;
+        [_watchMenu insertItem:emptyIt atIndex:insertIdx];
+        [_watchEventItems addObject:emptyIt];
+    } else {
+        NSUInteger limit = MIN((NSUInteger)5, _watchRecentEvents.count);
+        for (NSUInteger i = 0; i < limit; i++) {
+            NSDictionary *ev = _watchRecentEvents[i];
+            if (![ev isKindOfClass:[NSDictionary class]]) continue;
+            NSString *sev = [ev[@"severity"] isKindOfClass:[NSString class]] ? ev[@"severity"] : @"info";
+            NSString *title = [ev[@"title"] isKindOfClass:[NSString class]] ? ev[@"title"] : @"异常事件";
+            NSString *prefix = [sev isEqualToString:@"critical"] ? @"[严重]" : ([sev isEqualToString:@"warn"] ? @"[警告]" : @"[信息]");
+            NSString *line = [NSString stringWithFormat:@"%@ %@", prefix, title];
+            if (line.length > 44) {
+                line = [[line substringToIndex:43] stringByAppendingString:@"…"];
+            }
+            NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:line action:nil keyEquivalent:@""];
+            it.enabled = NO;
+            [_watchMenu insertItem:it atIndex:insertIdx++];
+            [_watchEventItems addObject:it];
+        }
+    }
+}
+
+- (void)runWatchCLI:(NSArray<NSString *> *)args then:(dispatch_block_t)done {
+    if (_watchBusy) return;
+    _watchBusy = YES;
+    _watchToggleItem.enabled = NO;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *script = @"/usr/local/bin/um790watch";
+        if (![[NSFileManager defaultManager] fileExistsAtPath:script]) {
+            script = @"/Users/limy/hackintosh/um790-watch/um790watch.py";
+        }
+        NSMutableArray<NSString *> *fullArgs = [NSMutableArray arrayWithObject:script];
+        [fullArgs addObjectsFromArray:args];
+        @try {
+            NSTask *task = [[NSTask alloc] init];
+            task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/python3"];
+            task.arguments = fullArgs;
+            task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+            task.standardError = [NSFileHandle fileHandleWithNullDevice];
+            [task launchAndReturnError:nil];
+            [task waitUntilExit];
+        } @catch (NSException *ex) {
+            logLine(@"um790watch task failed: %@", ex.reason);
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_watchBusy = NO;
+            [self refreshWatchState];
+            [self updateUI];
+            if (done) done();
+        });
+    });
+}
+
 - (void)updateUI {
+    [self updateWatchUI];
     NSStatusBarButton *btn = _statusItem.button;
     BOOL writable = _hasStatus && _status.admitted != 0;
 
@@ -463,8 +666,9 @@ static NSString *modeLabel(uint8_t mode, int16_t curCode, uint8_t owned, uint8_t
     }
 
     if (btn) {
-        btn.title = [NSString stringWithFormat:@" %u° %d",
-                     _status.temp_c[UM790_FAN_CPU], _status.rpm[UM790_FAN_CPU]];
+        NSString *badge = (_watchEnabled && _watchRunning && _watchUnreadCritical > 0) ? @" !" : @"";
+        btn.title = [NSString stringWithFormat:@" %u° %d%@",
+                     _status.temp_c[UM790_FAN_CPU], _status.rpm[UM790_FAN_CPU], badge];
     }
 
     _cpuInfoItem.title = [NSString stringWithFormat:@"CPU: %u°C · %d RPM · %@",
@@ -495,6 +699,7 @@ static NSString *modeLabel(uint8_t mode, int16_t curCode, uint8_t owned, uint8_t
 }
 
 - (void)pollAndUpdateUI {
+    [self refreshWatchState];
     if ([self fetchStatus]) {
         if (!_appliedInitialConfig && _status.admitted) {
             _appliedInitialConfig = YES;
@@ -538,6 +743,38 @@ static NSString *modeLabel(uint8_t mode, int16_t curCode, uint8_t owned, uint8_t
 - (void)onManualSys:(NSMenuItem *)sender { [self applyManualFan:UM790_FAN_SYS rpm:(int32_t)sender.tag]; }
 - (void)onCpuBackToCurve:(id)sender { (void)sender; [self restoreFanToCurve:UM790_FAN_CPU]; }
 - (void)onSysBackToCurve:(id)sender { (void)sender; [self restoreFanToCurve:UM790_FAN_SYS]; }
+
+- (void)onToggleWatch:(id)sender {
+    (void)sender;
+    NSString *cmd = (_watchEnabled && _watchRunning) ? @"off" : @"on";
+    [self runWatchCLI:@[cmd] then:nil];
+}
+
+- (void)onToggleWatchNotify:(id)sender {
+    (void)sender;
+    NSString *state = _watchNotify ? @"off" : @"on";
+    [self runWatchCLI:@[@"notify", state] then:nil];
+}
+
+- (void)onAckWatch:(id)sender {
+    (void)sender;
+    [self runWatchCLI:@[@"ack"] then:nil];
+}
+
+- (void)onOpenWatchReport:(id)sender {
+    (void)sender;
+    [self runWatchCLI:@[@"report", @"--save"] then:^{
+        NSString *rep = [@"~/Library/Logs/um790-watch/latest-report.md" stringByExpandingTildeInPath];
+        [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:rep]];
+    }];
+}
+
+- (void)onOpenWatchLogs:(id)sender {
+    (void)sender;
+    NSString *dir = [@"~/Library/Logs/um790-watch" stringByExpandingTildeInPath];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:dir]];
+}
 
 - (void)onQuitFirmware:(id)sender {
     (void)sender;

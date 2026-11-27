@@ -16,7 +16,7 @@ Minisforum UM790 Pro Hackintosh 专项性能优化合集，聚焦 **AMD Zen 4 �
 
 ---
 
-## 核心优化一览（三大模块）
+## 核心优化与工具一览
 
 ### 1. `um790-fan/`：IT5571 EC 原生双风扇控制 + AMD Zen 4 CPPC 自主睿频驱动
 - **`UM790Fan.kext` + `um790fan` CLI + `UM790FanBar.app` 菜单栏控制端**
@@ -72,7 +72,16 @@ Minisforum UM790 Pro Hackintosh 专项性能优化合集，聚焦 **AMD Zen 4 �
 - 原生 Metal/CPU 压测核心 [`src/metal_stress.m`](um790-bench/src/metal_stress.m) + 编排 CLI [`um790bench.py`](um790-bench/um790bench.py)。
 - 支持 `run`（全项基准 + `sysctl` 内核计数器审计 + Crash 监控）、`ab`（环境变量 A/B 对比）、`audit` 与 `compare`。
 
-### 4. `EFI/`（已脱敏的 OpenCore 引导配置）
+### 4. `um790-watch/`：零 GPU 开销常驻后台驱动故障与性能瓶颈检测（带一键开关）
+- **被动遥测核心** [`um790watch.py`](um790-watch/um790watch.py) + 菜单栏集成 [`UM790FanBar.m`](um790-fan/app/UM790FanBar.m) + `launchd` 模板 [`local.um790watch.plist.template`](um790-watch/local.um790watch.plist.template)：仅通过只读 `sysctl`、`ps`、增量日志 tail、`.ips` 崩溃监控与 `um790fan status --json` 采集指标，**不调用 Metal/GPU API**；关闭后即完全卸载守护进程（0 后台进程、0 唤醒）。
+- **监测范围**：
+  - **驱动故障**：`debug.phx_hang_kills`、Surface GPU 超时/高延迟峰值、`iop_fail` / `hdmi_reset` / `vm_refused`、`iop_async_drop` / `iop_late`、以及关联 `WindowServer` / `SecurityAgent` / Chrome GPU / `NVMTLDriver` / `libvulkan_radeon` 的 `.ips` 崩溃报告。
+  - **NVMTL / RADV 运行日志**：`VK_ERROR_OUT_OF_DEVICE_MEMORY` / `DEVICE_LOST`、`-1000158000` / `pass REFUSED` / `no pipeline` / `FAILED`、高频 `soft VRAM gate` / 缓存紧急回收、`host pointer` 导入突发被拒。
+  - **性能与温控瓶颈**：120Hz 多帧跳过突增 (`2x/3x/4x+` 掉帧)、`iop_copy` / `VBL` 延迟异常、`WindowServer` 持续高 CPU/内存、系统 `load1` / 高占用进程、`memorystatus` 内存压力及 CPU 温度 / EC 风扇异常。
+- **双端联动开关**：支持命令行 `um790watch on | off | toggle | notify on|off | status | report --save | tail | ack | clear` 以及 `UM790FanBar.app` 菜单栏一键开关、桌面严重告警通知开关、最新异常列表、一键生成 Markdown 诊断报告与清空未读角标。
+- **日志与报告路径**：配置位于 `~/Library/Application Support/UM790Watch/config.json`，事件日志与报告位于 `~/Library/Logs/um790-watch/`（`events.jsonl`、`events.log`、`latest-report.md`、`daemon.log`）。
+
+### 5. `EFI/`（已脱敏的 OpenCore 引导配置）
 - 收录 UM790 Pro 实机验证通过的引导文件与精简后（仅保留当前启用项）的配置：
   - **ACPI**：`SSDT-EC.aml`、`SSDT-USBX.aml`、`SSDT-CPUR.aml`
   - **Drivers**：`PhxEdidOverride.efi`、`HfsPlus.efi`、`OpenRuntime.efi`、`ResetNvramEntry.efi`、`KernReserveLow.efi`
@@ -170,4 +179,19 @@ clang -O2 -Wall -Wextra -framework Metal -framework Foundation -framework Quartz
 
 ./um790bench.py run --tag my-test
 ./um790bench.py compare results/<old>.json results/<new>.json
+```
+
+### 4. 安装与启停 `um790-watch` 常驻检测
+```bash
+chmod +x um790-watch/um790watch.py
+sudo ln -sfn "$(pwd)/um790-watch/um790watch.py" /usr/local/bin/um790watch
+
+# 运行单元测试
+python3 -m unittest -v um790-watch/test_um790watch.py
+
+# 启停、状态与诊断报告（也可在 UM790FanBar 菜单栏直接一键切换）
+um790watch on
+um790watch status
+um790watch report --save
+um790watch off
 ```
