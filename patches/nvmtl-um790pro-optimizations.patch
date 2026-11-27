@@ -1501,23 +1501,30 @@ index 6f826a5..40d432a 100644
 +    nvmtl_buffer_host_xfer_safe(b, b->_b.map, b->_hostPtr, NVP_SYNCOUT, "sync-out");
  }
 diff --git a/src/nmplugin/nvmtl_vk.c b/src/nmplugin/nvmtl_vk.c
-index 89ceca8..3c197d1 100644
+index 5e09be7..4557b88 100644
 --- a/src/nmplugin/nvmtl_vk.c
 +++ b/src/nmplugin/nvmtl_vk.c
-@@ -136,10 +136,12 @@ static _Atomic long g_slow_submit_ms;
- static PFN_vkCreatePipelineCache pvkCreatePipelineCache;
- static PFN_vkDestroyPipelineCache pvkDestroyPipelineCache;
- static PFN_vkGetPipelineCacheData pvkGetPipelineCacheData;
+@@ -133,6 +133,19 @@ static VkPhysicalDeviceLimits g_lim;
+ static uint32_t g_sm_count;
+ static _Atomic int g_state;
+ static _Atomic long g_slow_submit_ms;
++static PFN_vkCreatePipelineCache pvkCreatePipelineCache;
++static PFN_vkDestroyPipelineCache pvkDestroyPipelineCache;
++static PFN_vkGetPipelineCacheData pvkGetPipelineCacheData;
 +static PFN_vkMergePipelineCaches pvkMergePipelineCaches;
- static VkPipelineCache g_pipe_cache;
- static _Atomic uint64_t g_pipe_compiled;
- static pthread_mutex_t g_pipe_cache_lock = PTHREAD_MUTEX_INITIALIZER;
- static char g_pipe_cache_path[PATH_MAX];
++static VkPipelineCache g_pipe_cache;
++static _Atomic uint64_t g_pipe_compiled;
++static pthread_mutex_t g_pipe_cache_lock = PTHREAD_MUTEX_INITIALIZER;
++static char g_pipe_cache_path[PATH_MAX];
 +static char g_pipe_cache_shared_path[PATH_MAX];
- #define NVMTL_FENCE_POOL_CAP 32
- static VkFence g_fence_pool[NVMTL_FENCE_POOL_CAP];
- static unsigned g_fence_pool_n;
-@@ -173,6 +175,7 @@ static void nvmtl_vk_budget_charge(uint64_t bytes)
++#define NVMTL_FENCE_POOL_CAP 32
++static VkFence g_fence_pool[NVMTL_FENCE_POOL_CAP];
++static unsigned g_fence_pool_n;
++static pthread_mutex_t g_fence_pool_lock = PTHREAD_MUTEX_INITIALIZER;
+ static _Atomic uint64_t g_submit_wait_ns, g_submit_waits;
+ void nvmtl_vk_submit_wait_stats(uint64_t *total_ns, uint64_t *waits)
+ {
+@@ -162,6 +175,7 @@ static void nvmtl_vk_budget_charge(uint64_t bytes)
      g_budget_delta += (bytes + 65535ull) & ~65535ull;
  }
  static uint64_t g_vram_bytes, g_sys_bytes, g_spilled;
@@ -1525,7 +1532,7 @@ index 89ceca8..3c197d1 100644
  static int g_budget_ext;
  static int g_rt;
  #define NVMTL_RT_BUFFER_USAGE (g_rt ? (VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR) : 0)
-@@ -184,13 +187,47 @@ static PFN_vkGetAccelerationStructureDeviceAddressKHR pvkGetAccelerationStructur
+@@ -173,13 +187,47 @@ static PFN_vkGetAccelerationStructureDeviceAddressKHR pvkGetAccelerationStructur
  static PFN_vkCmdCopyAccelerationStructureKHR pvkCmdCopyAccelerationStructureKHR;
  #define NVMTL_VRAM_NONIMAGE (2655ull << 20)
  #define NVMTL_VRAM_HEADROOM_DEFAULT (1024ull << 20)
@@ -1574,7 +1581,7 @@ index 89ceca8..3c197d1 100644
  static int nvmtl_vk_vram_wall(uint64_t want, uint64_t *freev_out, uint64_t *bud_out, uint64_t *used_out, int *measured_out);
  
  static uint64_t g_buf_vram_refused;
-@@ -212,7 +249,7 @@ void nvmtl_vk_counts(uint64_t *bm, uint64_t *bg, uint64_t *im, uint64_t *ig, siz
+@@ -201,7 +249,7 @@ void nvmtl_vk_counts(uint64_t *bm, uint64_t *bg, uint64_t *im, uint64_t *ig, siz
  #define DEVICE_FNS(X) X(vkGetDeviceQueue) X(vkCreateBuffer) X(vkGetBufferMemoryRequirements) X(vkAllocateMemory) \
      X(vkBindBufferMemory) X(vkMapMemory) X(vkUnmapMemory) X(vkCreateImage) X(vkGetImageMemoryRequirements) X(vkBindImageMemory) \
      X(vkCreateImageView) X(vkCreateRenderPass) X(vkCreateFramebuffer) X(vkCreateShaderModule) X(vkDestroyShaderModule) X(vkCreatePipelineLayout) X(vkDestroyPipelineLayout) \
@@ -1583,10 +1590,30 @@ index 89ceca8..3c197d1 100644
      X(vkCmdBeginRenderPass) X(vkCmdBindPipeline) X(vkCmdDraw) X(vkCmdEndRenderPass) X(vkEndCommandBuffer) \
      X(vkQueueSubmit) X(vkQueueBindSparse) X(vkCreateFence) X(vkWaitForFences) X(vkResetFences) X(vkDestroyFence) X(vkCmdCopyImageToBuffer) X(vkCmdCopyBufferToImage) X(vkCmdCopyBuffer) \
      X(vkCmdPipelineBarrier) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) X(vkDeviceWaitIdle) X(vkFreeCommandBuffers) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdSetPrimitiveTopology) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdBindVertexBuffers) X(vkCreateDescriptorSetLayout) X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) X(vkDestroyDescriptorSetLayout) X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) X(vkCmdBindDescriptorSets) X(vkCreateSampler) X(vkDestroySampler) X(vkFreeDescriptorSets) X(vkCmdSetBlendConstants) X(vkCmdSetStencilReference) X(vkCmdSetDepthBias) X(vkCmdFillBuffer) X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed) X(vkCmdCopyImage) X(vkCmdBlitImage) X(vkGetBufferDeviceAddress) X(vkCmdWriteTimestamp) X(vkCreateQueryPool) X(vkCmdResetQueryPool) X(vkCmdBeginQuery) X(vkCmdEndQuery) X(vkCmdCopyQueryPoolResults) X(vkGetQueryPoolResults) X(vkDestroyQueryPool) X(vkResetQueryPool) X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect) X(vkCmdDispatchIndirect) X(vkCmdSetCullMode) X(vkCmdSetFrontFace) X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable) X(vkCmdSetDepthCompareOp) \
-@@ -442,6 +479,41 @@ static void nvmtl_pipe_cache_path(char *out, size_t cap, uint16_t vendor, const
-     size_t dlen = strlen(dir);
-     snprintf(out, cap, "%s%snvmtl-pcache-%u-%04x-%s.bin", dir, (dlen > 0 && dir[dlen - 1] == '/') ? "" : "/", uid, (unsigned)vendor, safe);
+@@ -411,14 +459,227 @@ static VkResult nvmtl_opaque_CreateCommandPool(VkDevice dev, const VkCommandPool
+     if (result == VK_SUCCESS) *out = handle;
+     return result;
  }
++static void nvmtl_pipe_cache_path(char *out, size_t cap, uint16_t vendor, const char *prog, const char *tmpdir, unsigned uid)
++{
++    if (!out || !cap) return;
++    out[0] = 0;
++    char safe[64];
++    size_t si = 0;
++    const char *p = (prog && *prog) ? prog : "app";
++    for (; *p && si + 1 < sizeof(safe); p++) {
++        unsigned char ch = (unsigned char)*p;
++        if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') ||
++            ch == '.' || ch == '_' || ch == '-')
++            safe[si++] = (char)ch;
++        else
++            safe[si++] = '_';
++    }
++    safe[si] = 0;
++    const char *dir = (tmpdir && *tmpdir) ? tmpdir : "/tmp";
++    size_t dlen = strlen(dir);
++    snprintf(out, cap, "%s%snvmtl-pcache-%u-%04x-%s.bin", dir, (dlen > 0 && dir[dlen - 1] == '/') ? "" : "/", uid, (unsigned)vendor, safe);
++}
 +static int nvmtl_pipe_cache_write_atomic(const char *path, const void *buf, size_t sz)
 +{
 +    char tmp[PATH_MAX];
@@ -1622,24 +1649,24 @@ index 89ceca8..3c197d1 100644
 +    if (sz_out) *sz_out = sz;
 +    return data;
 +}
- static void nvmtl_pipe_cache_save(void)
- {
-     if (g_state != 1 || !g_pipe_cache || !g_pipe_cache_path[0] || !pvkGetPipelineCacheData) return;
-@@ -460,18 +532,35 @@ static void nvmtl_pipe_cache_save(void)
-         pthread_mutex_unlock(&g_pipe_cache_lock);
-         return;
-     }
--    char tmp[PATH_MAX];
--    int n = snprintf(tmp, sizeof(tmp), "%s.tmp.%d", g_pipe_cache_path, (int)getpid());
--    if (n > 0 && (size_t)n < sizeof(tmp)) {
--        FILE *f = fopen(tmp, "wb");
--        if (f) {
--            size_t wr = fwrite(buf, 1, sz, f);
--            int closed = fclose(f);
--            if (wr == sz && closed == 0) {
--                if (rename(tmp, g_pipe_cache_path) != 0) unlink(tmp);
--            } else {
--                unlink(tmp);
++static void nvmtl_pipe_cache_save(void)
++{
++    if (g_state != 1 || !g_pipe_cache || !g_pipe_cache_path[0] || !pvkGetPipelineCacheData) return;
++    pthread_mutex_lock(&g_pipe_cache_lock);
++    VkPipelineCache cache = g_pipe_cache;
++    if (!cache || g_state != 1) { pthread_mutex_unlock(&g_pipe_cache_lock); return; }
++    size_t sz = 0;
++    if (pvkGetPipelineCacheData(g_dev, cache, &sz, NULL) != VK_SUCCESS || !sz || sz > (64u << 20)) {
++        pthread_mutex_unlock(&g_pipe_cache_lock);
++        return;
++    }
++    void *buf = malloc(sz);
++    if (!buf) { pthread_mutex_unlock(&g_pipe_cache_lock); return; }
++    if (pvkGetPipelineCacheData(g_dev, cache, &sz, buf) != VK_SUCCESS || !sz) {
++        free(buf);
++        pthread_mutex_unlock(&g_pipe_cache_lock);
++        return;
++    }
 +    (void)nvmtl_pipe_cache_write_atomic(g_pipe_cache_path, buf, sz);
 +
 +    const char *noshare = getenv("NVMTL_NO_PIPE_CACHE_SHARE");
@@ -1667,31 +1694,21 @@ index 89ceca8..3c197d1 100644
 +                    }
 +                    pvkDestroyPipelineCache(g_dev, merged, NULL);
 +                }
-             }
++            }
 +            if (sdata) free(sdata);
-         }
-     }
-     free(buf);
-@@ -485,25 +574,44 @@ static void nvmtl_pipe_cache_init(void)
-         return;
-     }
-     if (!pvkCreatePipelineCache || !pvkDestroyPipelineCache || !pvkGetPipelineCacheData) return;
--    nvmtl_pipe_cache_path(g_pipe_cache_path, sizeof(g_pipe_cache_path), nvmtl_vk_vendor(),
--                          getprogname(), getenv("TMPDIR"), (unsigned)geteuid());
--    void *data = NULL;
--    size_t sz = 0;
--    if (g_pipe_cache_path[0]) {
--        FILE *f = fopen(g_pipe_cache_path, "rb");
--        if (f) {
--            if (fseek(f, 0, SEEK_END) == 0) {
--                long fsz = ftell(f);
--                if (fsz > 0 && (unsigned long)fsz <= (64ul << 20) && fseek(f, 0, SEEK_SET) == 0) {
--                    data = malloc((size_t)fsz);
--                    if (data) {
--                        sz = fread(data, 1, (size_t)fsz, f);
--                        if (sz != (size_t)fsz) { free(data); data = NULL; sz = 0; }
--                    }
--                }
++        }
++    }
++    free(buf);
++    pthread_mutex_unlock(&g_pipe_cache_lock);
++}
++static void nvmtl_pipe_cache_init(void)
++{
++    const char *env = getenv("NVMTL_PIPE_CACHE");
++    if (env && env[0] == '0') {
++        nvlog("vk: persistent pipeline cache OFF (NVMTL_PIPE_CACHE=0)");
++        return;
++    }
++    if (!pvkCreatePipelineCache || !pvkDestroyPipelineCache || !pvkGetPipelineCacheData) return;
 +    const char *dir = NULL;
 +    const char *cdir = getenv("NVMTL_PIPE_CACHE_DIR");
 +    const char *tmpdir = getenv("TMPDIR");
@@ -1709,9 +1726,8 @@ index 89ceca8..3c197d1 100644
 +            if (snprintf(cache_dir, sizeof cache_dir, "%s%snvmtl", ucd, (ul > 0 && ucd[ul - 1] == '/') ? "" : "/") < (int)sizeof cache_dir) {
 +                mkdir(cache_dir, 0700);
 +                if (access(cache_dir, W_OK) == 0) dir = cache_dir;
-             }
--            fclose(f);
-         }
++            }
++        }
 +#endif
 +        if (!dir) dir = (tmpdir && *tmpdir) ? tmpdir : "/tmp";
 +    }
@@ -1731,43 +1747,65 @@ index 89ceca8..3c197d1 100644
 +        if (data) { free(data); data = NULL; }
 +        data = nvmtl_pipe_cache_read_file(g_pipe_cache_shared_path, 64ul << 20, &sz);
 +        if (data && sz) loaded_from = g_pipe_cache_shared_path;
-     }
-     VkPipelineCacheCreateInfo ci = { VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, NULL, 0, sz, data };
-     VkPipelineCache pc = VK_NULL_HANDLE;
-@@ -516,14 +624,15 @@ static void nvmtl_pipe_cache_init(void)
-     if (data) free(data);
-     if (r == VK_SUCCESS && pc) {
-         g_pipe_cache = pc;
--        atexit(nvmtl_pipe_cache_save);
--        nvlog("vk: persistent pipeline cache ON (%zu bytes loaded from %s)", sz, g_pipe_cache_path);
++    }
++    VkPipelineCacheCreateInfo ci = { VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, NULL, 0, sz, data };
++    VkPipelineCache pc = VK_NULL_HANDLE;
++    VkResult r = pvkCreatePipelineCache(g_dev, &ci, NULL, &pc);
++    if (r != VK_SUCCESS && data) {
++        free(data); data = NULL; sz = 0;
++        ci.initialDataSize = 0; ci.pInitialData = NULL;
++        r = pvkCreatePipelineCache(g_dev, &ci, NULL, &pc);
++    }
++    if (data) free(data);
++    if (r == VK_SUCCESS && pc) {
++        g_pipe_cache = pc;
 +        static int atexit_reg;
 +        if (!atexit_reg) { atexit_reg = 1; atexit(nvmtl_pipe_cache_save); }
 +        nvlog("vk: persistent pipeline cache ON (%zu bytes loaded from %s)", sz, loaded_from);
-     }
- }
- static void nvmtl_pipe_cache_note_compile(void)
- {
-     uint64_t n = atomic_fetch_add(&g_pipe_compiled, 1) + 1;
--    if (n >= 8 && (n & (n - 1)) == 0)
++    }
++}
++static void nvmtl_pipe_cache_note_compile(void)
++{
++    uint64_t n = atomic_fetch_add(&g_pipe_compiled, 1) + 1;
 +    if (n >= 2 && (n & (n - 1)) == 0)
-         nvmtl_pipe_cache_save();
- }
- static VkResult nvmtl_fence_acquire(VkFence *out)
-@@ -536,7 +645,12 @@ static VkResult nvmtl_fence_acquire(VkFence *out)
-     }
-     pthread_mutex_unlock(&g_fence_pool_lock);
-     VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, NULL, 0 };
--    return pvkCreateFence(g_dev, &fci, NULL, out);
++        nvmtl_pipe_cache_save();
++}
++static VkResult nvmtl_fence_acquire(VkFence *out)
++{
++    pthread_mutex_lock(&g_fence_pool_lock);
++    if (g_fence_pool_n > 0) {
++        *out = g_fence_pool[--g_fence_pool_n];
++        pthread_mutex_unlock(&g_fence_pool_lock);
++        return VK_SUCCESS;
++    }
++    pthread_mutex_unlock(&g_fence_pool_lock);
++    VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, NULL, 0 };
 +    VkResult fr = pvkCreateFence(g_dev, &fci, NULL, out);
 +    if (fr != VK_SUCCESS) {
 +        nvmtl_vk_pressure_reclaim(1, 1);
 +        fr = pvkCreateFence(g_dev, &fci, NULL, out);
 +    }
 +    return fr;
- }
- static void nvmtl_fence_release(VkFence fence, int healthy)
++}
++static void nvmtl_fence_release(VkFence fence, int healthy)
++{
++    if (!fence) return;
++    if (healthy && g_state == 1 && pvkResetFences && pvkResetFences(g_dev, 1, &fence) == VK_SUCCESS) {
++        pthread_mutex_lock(&g_fence_pool_lock);
++        if (g_fence_pool_n < NVMTL_FENCE_POOL_CAP) {
++            g_fence_pool[g_fence_pool_n++] = fence;
++            pthread_mutex_unlock(&g_fence_pool_lock);
++            return;
++        }
++        pthread_mutex_unlock(&g_fence_pool_lock);
++    }
++    pvkDestroyFence(g_dev, fence, NULL);
++}
++
+ static VkResult nvmtl_opaque_CreateGraphicsPipelines(VkDevice dev, VkPipelineCache cache, uint32_t count, const VkGraphicsPipelineCreateInfo *info, const VkAllocationCallbacks *allocator, void **out)
  {
-@@ -560,7 +674,11 @@ static VkResult nvmtl_opaque_CreateGraphicsPipelines(VkDevice dev, VkPipelineCac
+     if (count != 1) return VK_ERROR_INITIALIZATION_FAILED;
++    if (cache == VK_NULL_HANDLE) cache = g_pipe_cache;
      VkPipeline handle = VK_NULL_HANDLE;
      VkGraphicsPipelineCreateInfo pinfo;
      if (g_pstat) { pinfo = *info; pinfo.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR; info = &pinfo; }
@@ -1775,31 +1813,48 @@ index 89ceca8..3c197d1 100644
 +    const int lock_cache = (cache != VK_NULL_HANDLE && cache == g_pipe_cache);
 +    if (lock_cache) pthread_mutex_lock(&g_pipe_cache_lock);
      VkResult result = pvkCreateGraphicsPipelines(dev, cache, count, info, allocator, &handle);
+-    if (result == VK_SUCCESS) *out = handle;
 +    if (lock_cache) pthread_mutex_unlock(&g_pipe_cache_lock);
-     if (result == VK_SUCCESS) { *out = handle; nvmtl_pipe_cache_note_compile(); }
++    if (result == VK_SUCCESS) { *out = handle; nvmtl_pipe_cache_note_compile(); }
      else if (handle) pvkDestroyPipeline(dev, handle, allocator);
      return result;
-@@ -599,7 +717,11 @@ static VkResult nvmtl_opaque_CreateComputePipelines(VkDevice dev, VkPipelineCach
+ }
+@@ -454,9 +715,14 @@ int nvmtl_vk_pipeline_stats(void *pipe, char *out, size_t n)
+ static VkResult nvmtl_opaque_CreateComputePipelines(VkDevice dev, VkPipelineCache cache, uint32_t count, const VkComputePipelineCreateInfo *info, const VkAllocationCallbacks *allocator, void **out)
+ {
      if (count != 1) return VK_ERROR_INITIALIZATION_FAILED;
-     if (cache == VK_NULL_HANDLE) cache = g_pipe_cache;
++    if (cache == VK_NULL_HANDLE) cache = g_pipe_cache;
      VkPipeline handle = VK_NULL_HANDLE;
 +    nvmtl_vk_pre_pipeline_reclaim();
 +    const int lock_cache = (cache != VK_NULL_HANDLE && cache == g_pipe_cache);
 +    if (lock_cache) pthread_mutex_lock(&g_pipe_cache_lock);
      VkResult result = pvkCreateComputePipelines(dev, cache, count, info, allocator, &handle);
+-    if (result == VK_SUCCESS) *out = handle;
 +    if (lock_cache) pthread_mutex_unlock(&g_pipe_cache_lock);
-     if (result == VK_SUCCESS) { *out = handle; nvmtl_pipe_cache_note_compile(); }
++    if (result == VK_SUCCESS) { *out = handle; nvmtl_pipe_cache_note_compile(); }
      else if (handle) pvkDestroyPipeline(dev, handle, allocator);
      return result;
-@@ -1228,6 +1350,7 @@ static int nvmtl_vk_initialize(void)
-     pvkCreatePipelineCache = (PFN_vkCreatePipelineCache)pvkGetDeviceProcAddr(g_dev, "vkCreatePipelineCache");
-     pvkDestroyPipelineCache = (PFN_vkDestroyPipelineCache)pvkGetDeviceProcAddr(g_dev, "vkDestroyPipelineCache");
-     pvkGetPipelineCacheData = (PFN_vkGetPipelineCacheData)pvkGetDeviceProcAddr(g_dev, "vkGetPipelineCacheData");
+ }
+@@ -1081,6 +1347,10 @@ static int nvmtl_vk_initialize(void)
+     pvkCreateRenderPass2 = (PFN_vkCreateRenderPass2)pvkGetDeviceProcAddr(g_dev, "vkCreateRenderPass2");
+     pvkCreateBufferView = (PFN_vkCreateBufferView)pvkGetDeviceProcAddr(g_dev, "vkCreateBufferView");
+     pvkDestroyBufferView = (PFN_vkDestroyBufferView)pvkGetDeviceProcAddr(g_dev, "vkDestroyBufferView");
++    pvkCreatePipelineCache = (PFN_vkCreatePipelineCache)pvkGetDeviceProcAddr(g_dev, "vkCreatePipelineCache");
++    pvkDestroyPipelineCache = (PFN_vkDestroyPipelineCache)pvkGetDeviceProcAddr(g_dev, "vkDestroyPipelineCache");
++    pvkGetPipelineCacheData = (PFN_vkGetPipelineCacheData)pvkGetDeviceProcAddr(g_dev, "vkGetPipelineCacheData");
 +    pvkMergePipelineCaches = (PFN_vkMergePipelineCaches)pvkGetDeviceProcAddr(g_dev, "vkMergePipelineCaches");
      { VkPhysicalDeviceDepthStencilResolveProperties dsp = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES };
        VkPhysicalDeviceProperties2 pp2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &dsp };
        pvkGetPhysicalDeviceProperties2(g_pdev, &pp2);
-@@ -1349,6 +1472,7 @@ static void bpark_free(nvk_buffer *b)
+@@ -1092,6 +1362,7 @@ static int nvmtl_vk_initialize(void)
+     pvkGetDeviceQueue(g_dev, g_qfam, 0, &g_queue);
+ 
+     g_state = 1;
++    nvmtl_pipe_cache_init();
+     nvlog("vk: UP in this Metal process — \"%s\" api %u.%u.%u, queue family %u", g_name,
+           VK_VERSION_MAJOR(pp.apiVersion), VK_VERSION_MINOR(pp.apiVersion), VK_VERSION_PATCH(pp.apiVersion), g_qfam);
+     return 0;
+@@ -1201,6 +1472,7 @@ static void bpark_free(nvk_buffer *b)
      pvkDestroyBuffer(g_dev, (VkBuffer)b->buf, NULL);
      if (b->map && pvkUnmapMemory) pvkUnmapMemory(g_dev, (VkDeviceMemory)b->mem);
      if (b->bar1) g_bar1_bytes -= b->alloc;
@@ -1807,7 +1862,7 @@ index 89ceca8..3c197d1 100644
      pvkFreeMemory(g_dev, (VkDeviceMemory)b->mem, NULL); g_alloc_bytes -= b->alloc;
      memset(b, 0, sizeof *b);
  }
-@@ -1371,19 +1495,178 @@ static int bpark_take(size_t size, int host_visible, nvk_buffer *out)
+@@ -1223,19 +1495,178 @@ static int bpark_take(size_t size, int host_visible, nvk_buffer *out)
      atomic_fetch_add(&g_bpark_reused, 1); bpark_census("reuse");
      return 0;
  }
@@ -1817,7 +1872,8 @@ index 89ceca8..3c197d1 100644
 +    return nvmtl_vk_vendor() == 0x1002 ? (64ull << 20) : NVMTL_BUFPARK_BYTES;
 +}
 +static uint64_t bpark_drain_all(void)
-+{
+ {
+-    nvk_buffer out[NVMTL_BUFPARK_N]; unsigned nout = 0;
 +    nvk_buffer out[NVMTL_BUFPARK_N];
 +    unsigned nout = 0;
 +    uint64_t freed = 0;
@@ -1837,8 +1893,7 @@ index 89ceca8..3c197d1 100644
 +    return freed;
 +}
 +static uint64_t bpark_drain_private(void)
- {
--    nvk_buffer out[NVMTL_BUFPARK_N]; unsigned nout = 0;
++{
 +    nvk_buffer out[NVMTL_BUFPARK_N]; unsigned nout = 0; uint64_t freed = 0;
      pthread_mutex_lock(&g_bpark_lock);
      unsigned w = 0;
@@ -1990,7 +2045,7 @@ index 89ceca8..3c197d1 100644
  }
  static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer *out);
  static pthread_mutex_t nvmtl_submit_mutex;
-@@ -1445,6 +1728,18 @@ static int nvmtl_vk_buffer_create_sparse(size_t size, nvk_buffer *out)
+@@ -1297,6 +1728,18 @@ static int nvmtl_vk_buffer_create_sparse(size_t size, nvk_buffer *out)
                  if (mt >= 0) { mai.memoryTypeIndex = (uint32_t)mt; ar = pvkAllocateMemory(g_dev, &mai, NULL, &m); } }
      if (ar != VK_SUCCESS) { int mt = nvmtl_vk_sysmem_type(mr.memoryTypeBits); sys = 1;
                              if (mt >= 0) { mai.memoryTypeIndex = (uint32_t)mt; ar = pvkAllocateMemory(g_dev, &mai, NULL, &m); } }
@@ -2009,7 +2064,7 @@ index 89ceca8..3c197d1 100644
      if (ar != VK_SUCCESS || nvmtl_vk_sparse_bind(b, 0, m, mr.size)) {
          if (m) pvkFreeMemory(g_dev, m, NULL);
          pvkDestroyBuffer(g_dev, b, NULL);
-@@ -1453,7 +1748,11 @@ static int nvmtl_vk_buffer_create_sparse(size_t size, nvk_buffer *out)
+@@ -1305,7 +1748,11 @@ static int nvmtl_vk_buffer_create_sparse(size_t size, nvk_buffer *out)
      }
      out->buf = b; out->mem = m; out->size = size; out->alloc = mr.size; out->sparse = 1; out->sysmem = sys;
      g_alloc_bytes += mr.size; g_buf_made++; g_res3_made++;
@@ -2022,7 +2077,7 @@ index 89ceca8..3c197d1 100644
      else { g_res3_madesys++; g_buf_vram_refused++;
             nvlog("vk: private buffer of %zu bytes REFUSED VRAM (our soft gate) -> system memory under a stable address (res3): %llu MB free, "
                   "heapUsage %llu of budget %llu MB, %llu refused so far", size, (unsigned long long)(bfree >> 20),
-@@ -1470,6 +1769,7 @@ int nvmtl_vk_buffer_create(size_t size, int host_visible, nvk_buffer *out)
+@@ -1322,6 +1769,7 @@ int nvmtl_vk_buffer_create(size_t size, int host_visible, nvk_buffer *out)
          if (pending.buf) pvkDestroyBuffer(g_dev, (VkBuffer)pending.buf, NULL);
          if (pending.mem) {
              if (pending.map) pvkUnmapMemory(g_dev, (VkDeviceMemory)pending.mem);
@@ -2030,7 +2085,7 @@ index 89ceca8..3c197d1 100644
              pvkFreeMemory(g_dev, (VkDeviceMemory)pending.mem, NULL);
              if (!host_visible) g_budget_stale = 1;
          }
-@@ -1523,6 +1823,11 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
+@@ -1375,6 +1823,11 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
          int bgate = nvmtl_vk_vram_wall(mr.size, &bfree, &bbud, &bused, &bmeas);
          VkResult br = bgate ? VK_ERROR_OUT_OF_DEVICE_MEMORY
                              : nvmtl_opaque_AllocateMemory(g_dev, &mai, NULL, &out->mem);
@@ -2042,7 +2097,7 @@ index 89ceca8..3c197d1 100644
          if (br != VK_SUCCESS) {
              g_buf_vram_refused++;
              bpark_drain_private();
-@@ -1537,9 +1842,20 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
+@@ -1389,9 +1842,20 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
                    (unsigned long long)g_buf_vram_refused);
              return -1;
          }
@@ -2065,7 +2120,7 @@ index 89ceca8..3c197d1 100644
      VKCK(pvkBindBufferMemory(g_dev, out->buf, out->mem, 0), "vkBindBufferMemory");
      if (host_visible) { VkResult mr_ = pvkMapMemory(g_dev, out->mem, 0, VK_WHOLE_SIZE, 0, &out->map); if (mr_ != VK_SUCCESS) {
          nvlog("vk: vkMapMemory -> %d with %llu buffers live (%llu made, %llu gone), %zu bytes allocated, memory type %d", mr_,
-@@ -1611,7 +1927,15 @@ int nvmtl_vk_buffer_import_host(void *ptr, size_t size, nvk_buffer *out)
+@@ -1463,13 +1927,21 @@ int nvmtl_vk_buffer_import_host(void *ptr, size_t size, nvk_buffer *out)
      VkImportMemoryHostPointerInfoEXT imp = { VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT, &mafi,
                                               VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, ptr };
      VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &imp, size, (uint32_t)mt };
@@ -2082,7 +2137,14 @@ index 89ceca8..3c197d1 100644
          nvlog("vk: vkAllocateMemory refused the imported host pointer %p (%zu bytes, memory type %d)", ptr, size, mt);
          pvkDestroyBuffer(g_dev, (VkBuffer)out->buf, NULL); out->buf = NULL; out->mem = NULL; return -1; }
      if (pvkBindBufferMemory(g_dev, (VkBuffer)out->buf, (VkDeviceMemory)out->mem, 0) != VK_SUCCESS) {
-@@ -1680,9 +2004,35 @@ static int nvmtl_vk_3d_slice_ok(VkFormat fmt, VkImageUsageFlags usage)
+         nvlog("vk: vkBindBufferMemory refused the imported allocation");
+         pvkFreeMemory(g_dev, (VkDeviceMemory)out->mem, NULL); pvkDestroyBuffer(g_dev, (VkBuffer)out->buf, NULL);
+-        out->buf = NULL; out->mem = NULL; return -1; }
++        out->buf = NULL; out->mem = NULL; out->bda = 0; return -1; }
+     out->map = ptr; out->alloc = size; out->imported = 1; out->htype = mt + 1;
+     g_alloc_bytes += size; g_buf_made++;
+     { static int said; if (!said++) nvlog("vk: imported the caller's pages as device memory — %zu bytes at %p, memory type %d", size, ptr, mt); }
+@@ -1532,9 +2004,35 @@ static int nvmtl_vk_3d_slice_ok(VkFormat fmt, VkImageUsageFlags usage)
                (unsigned)fmt, (unsigned)usage, (int)r);
      return r == VK_SUCCESS;
  }
@@ -2120,7 +2182,7 @@ index 89ceca8..3c197d1 100644
      if (ici->imageType == VK_IMAGE_TYPE_2D && ici->samples == VK_SAMPLE_COUNT_1_BIT
          && nvmtl_vk_cube_compat(out->mtl_type, ici->extent.width, ici->extent.height, ici->arrayLayers))
          ici->flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
-@@ -1780,6 +2130,7 @@ static int nvmtl_vk_vram_budget(uint64_t *budget, uint64_t *used)
+@@ -1632,6 +2130,7 @@ static int nvmtl_vk_vram_budget(uint64_t *budget, uint64_t *used)
  }
  static int nvmtl_vk_vram_wall0(uint64_t want, uint64_t *freev_out, uint64_t *bud_out, uint64_t *used_out, int *measured_out);
  uint64_t (*nvmtl_reclaim_hook)(uint64_t need);
@@ -2128,7 +2190,7 @@ index 89ceca8..3c197d1 100644
  void (*nvmtl_res2_pressure_hook)(uint64_t want);
  uint64_t (*nvmtl_res2_evict_hook)(uint64_t want);
  static uint64_t g_res2_evict_calls, g_res2_evict_won;
-@@ -1788,7 +2139,6 @@ static int nvmtl_res2_evict_off(void) {
+@@ -1640,7 +2139,6 @@ static int nvmtl_res2_evict_off(void) {
      if (off < 0) { const char *e = getenv("NVMTL_NO_RES2_EVICT"); off = (e && *e && *e != '0') ? 1 : 0; }
      return off;
  }
@@ -2136,7 +2198,7 @@ index 89ceca8..3c197d1 100644
  static uint64_t g_res1_calls, g_res1_credit, g_res1_seen_free, g_res1_admit;
  static int nvmtl_vk_vram_wall(uint64_t want, uint64_t *freev_out, uint64_t *bud_out, uint64_t *used_out, int *measured_out)
  {
-@@ -1796,6 +2146,23 @@ static int nvmtl_vk_vram_wall(uint64_t want, uint64_t *freev_out, uint64_t *bud_
+@@ -1648,6 +2146,23 @@ static int nvmtl_vk_vram_wall(uint64_t want, uint64_t *freev_out, uint64_t *bud_
      int gate = nvmtl_vk_vram_wall0(want, &fv, &bd, &us, &ms);
      if (fv > g_res1_seen_free) { uint64_t up = fv - g_res1_seen_free; g_res1_credit = g_res1_credit > up ? g_res1_credit - up : 0; }
      g_res1_seen_free = fv;
@@ -2160,7 +2222,7 @@ index 89ceca8..3c197d1 100644
      if (gate && nvmtl_reclaim_hook && !t_in_reclaim) {
          uint64_t need = want + NVMTL_VRAM_HEADROOM > fv + g_res1_credit ? want + NVMTL_VRAM_HEADROOM - fv - g_res1_credit : 0;
          if (need) {
-@@ -1836,6 +2203,18 @@ static int nvmtl_vk_vram_wall(uint64_t want, uint64_t *freev_out, uint64_t *bud_
+@@ -1688,6 +2203,18 @@ static int nvmtl_vk_vram_wall(uint64_t want, uint64_t *freev_out, uint64_t *bud_
  }
  static int nvmtl_vk_vram_wall0(uint64_t want, uint64_t *freev_out, uint64_t *bud_out, uint64_t *used_out, int *measured_out)
  {
@@ -2179,7 +2241,7 @@ index 89ceca8..3c197d1 100644
      uint64_t bud = 0, used = 0;
      int measured = nvmtl_vk_vram_budget(&bud, &used);
      uint64_t card = nvmtl_vk_vram_bytes();
-@@ -1901,10 +2280,15 @@ static VkResult nvmtl_vk_alloc_image_mem(const VkMemoryRequirements *mr, VkDevic
+@@ -1753,10 +2280,15 @@ static VkResult nvmtl_vk_alloc_image_mem(const VkMemoryRequirements *mr, VkDevic
      int gate = nvmtl_vk_vram_wall(mr->size, &freev, &bud, &used, &measured);
      VkResult r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
      if (!gate) r = pvkAllocateMemory(g_dev, &mai, NULL, mem);
@@ -2199,7 +2261,7 @@ index 89ceca8..3c197d1 100644
      if (r == VK_ERROR_OUT_OF_DEVICE_MEMORY && nvmtl_res2_evict_hook && !t_in_reclaim && !nvmtl_res2_evict_off()) {
          t_in_reclaim = 1;
          const uint64_t freed = nvmtl_res2_evict_hook(mr->size | (1ull << 63));
-@@ -1921,19 +2305,54 @@ static VkResult nvmtl_vk_alloc_image_mem(const VkMemoryRequirements *mr, VkDevic
+@@ -1773,19 +2305,54 @@ static VkResult nvmtl_vk_alloc_image_mem(const VkMemoryRequirements *mr, VkDevic
                        (unsigned long long)g_res2_evict_won, (unsigned long long)g_res2_evict_calls); }
          }
      }
@@ -2261,7 +2323,7 @@ index 89ceca8..3c197d1 100644
      }
      return r;
  }
-@@ -1992,7 +2411,9 @@ static int nvmtl_vk_image_create_ms_lifetime_body(uint32_t w, uint32_t h, uint32
+@@ -1844,7 +2411,9 @@ static int nvmtl_vk_image_create_ms_lifetime_body(uint32_t w, uint32_t h, uint32
      VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, 0, VK_IMAGE_TYPE_2D, (VkFormat)vkfmt, { w, h, 1 }, 1, layers,
          (VkSampleCountFlagBits)samples, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
          VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED };
@@ -2272,7 +2334,7 @@ index 89ceca8..3c197d1 100644
      VKCK(nvmtl_opaque_CreateImage(g_dev, &ici, NULL, &out->img), "vkCreateImage(ms)");
      VkMemoryRequirements mr; pvkGetImageMemoryRequirements(g_dev, out->img, &mr);
      VKCK(nvmtl_alloc_opaque_image_mem(&mr, &out->mem, &out->sysmem, "multisample"), "vkAllocateMemory(ms)");
-@@ -2007,6 +2428,27 @@ static int nvmtl_vk_image_create_ms_lifetime_body(uint32_t w, uint32_t h, uint32
+@@ -1859,6 +2428,27 @@ static int nvmtl_vk_image_create_ms_lifetime_body(uint32_t w, uint32_t h, uint32
  static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out);
  int nvmtl_vk_image_create_typed(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out)
  {
@@ -2300,7 +2362,7 @@ index 89ceca8..3c197d1 100644
      nvk_image pending = {0};
      int result = nvmtl_vk_image_create_typed_lifetime_body(w, h, vkfmt, bpp, a8, mips, storage, mtl_type, layers, &pending);
      if (result) { nvmtl_failed_image(&pending); memset(out, 0, sizeof *out); }
-@@ -2023,14 +2465,16 @@ static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uin
+@@ -1875,14 +2465,16 @@ static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uin
      VkFormat fmt = (VkFormat)vkfmt;
      storage = storage && !a8 && nvmtl_vk_format_is_storage(vkfmt);
      memset(out, 0, sizeof *out); out->w = w; out->h = h; out->mips = mips; out->fmt = vkfmt; out->bpp = bpp ? bpp : 4;
@@ -2319,7 +2381,16 @@ index 89ceca8..3c197d1 100644
      VKCK(nvmtl_opaque_CreateImage(g_dev, &ici, NULL, &out->img), "vkCreateImage");
      VkMemoryRequirements mr; pvkGetImageMemoryRequirements(g_dev, out->img, &mr);
      VKCK(nvmtl_alloc_opaque_image_mem(&mr, &out->mem, &out->sysmem, "colour"), "vkAllocateMemory(image)");
-@@ -2233,15 +2677,17 @@ static int nvmtl_spirv_bmask(const void *p, size_t n, uint64_t out[4])
+@@ -2054,7 +2646,7 @@ static int nvmtl_spirv_bands_ok(const void *p, size_t n, const char *what)
+     for (size_t i = 5; heap && i < nw; ) {
+         uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu;
+         if (!wc || i + wc > nw) break;
+-        if (op == 71 && wc == 4 && w[i + 2] == 34 && w[i + 3] == 2 && w[i + 1] < bound) heap[w[i + 1]] = 1;
++        if (op == 71 && wc == 4 && w[i + 2] == 34 && (w[i + 3] == 2 || (w[i + 3] == 3 && nvmtl_fbfetch_on())) && w[i + 1] < bound) heap[w[i + 1]] = 1;
+         i += wc;
+     }
+     int ok = 1;
+@@ -2085,15 +2677,17 @@ static int nvmtl_spirv_bmask(const void *p, size_t n, uint64_t out[4])
      const uint32_t *w = (const uint32_t *)p; size_t nw = n / 4;
      memset(out, 0, 4 * sizeof *out);
      if (!p || nw < 5 || w[0] != 0x07230203u) return 0;
@@ -2340,7 +2411,7 @@ index 89ceca8..3c197d1 100644
          i += wc;
      }
      int ok = 1;
-@@ -2481,7 +2927,12 @@ static int nvmtl_desc_pool_open(void)
+@@ -2333,7 +2927,12 @@ static int nvmtl_desc_pool_open(void)
      VkMutableDescriptorTypeCreateInfoEXT pmi = { VK_STRUCTURE_TYPE_MUTABLE_DESCRIPTOR_TYPE_CREATE_INFO_EXT, NULL, 5, plists };
      if (g_mutable_layout) { sizes[2].type = VK_DESCRIPTOR_TYPE_MUTABLE_EXT; pci.pNext = &pmi; }
      if (g_mutable_stex) sizes[4].type = VK_DESCRIPTOR_TYPE_MUTABLE_EXT; else plists[4] = (VkMutableDescriptorTypeListEXT){ 0, NULL };
@@ -2354,7 +2425,7 @@ index 89ceca8..3c197d1 100644
      g_ndescPools++;
      if (g_ndescPools > 1)
          nvlog("vk: descriptor pool %u opened (%u sets) — the open ones were full", g_ndescPools, sets);
-@@ -2751,8 +3202,10 @@ int nvmtl_vk_bind_buffer_offset(nvk_cmdbuf *c, uint32_t set, uint32_t index, siz
+@@ -2603,8 +3202,10 @@ int nvmtl_vk_bind_buffer_offset(nvk_cmdbuf *c, uint32_t set, uint32_t index, siz
  #define NVMTL_TABLE_BYTES ((2 * NVMTL_NBUF + NVMTL_NTEX) * sizeof(uint64_t))
  typedef struct nvmtl_address_page { nvk_buffer buffer; struct nvmtl_address_page *next; } nvmtl_address_page;
  #define NVMTL_KEEP 256
@@ -2366,7 +2437,7 @@ index 89ceca8..3c197d1 100644
  static nvmtl_address_page *g_keep_page[NVMTL_KEEP]; static unsigned g_keep_npage;
  static int nvmtl_keep_on(void)
  {
-@@ -2760,23 +3213,30 @@ static int nvmtl_keep_on(void)
+@@ -2612,23 +3213,30 @@ static int nvmtl_keep_on(void)
      if (on < 0) {
          const char *e = getenv("NVMTL_POOL_REUSE");
          on = (!e || e[0] == '1') && getenv("NVMTL_NO_POOL_REUSE") == NULL;
@@ -2405,7 +2476,7 @@ index 89ceca8..3c197d1 100644
      return kept;
  }
  static nvmtl_address_page *nvmtl_keep_page_pop(void)
-@@ -2790,9 +3250,43 @@ static int nvmtl_keep_page_push(nvmtl_address_page *p)
+@@ -2642,9 +3250,43 @@ static int nvmtl_keep_page_push(nvmtl_address_page *p)
  {
      int kept = 0;
      if (!nvmtl_keep_on()) return 0;
@@ -2450,7 +2521,7 @@ index 89ceca8..3c197d1 100644
  #define NVMTL_WIT_SLOTS 4096u
  #define NVMTL_WSEQ_BLIND 0xFFFFFFFFu
  static nvk_buffer g_wit; static int g_wit_state;
-@@ -2910,9 +3404,10 @@ static int nvmtl_address_snapshot(nvk_cmdbuf *c, uint32_t which, VkDescriptorBuf
+@@ -2762,9 +3404,10 @@ static int nvmtl_address_snapshot(nvk_cmdbuf *c, uint32_t which, VkDescriptorBuf
      }
      uint64_t *addresses = (uint64_t *)((uint8_t *)page->buffer.map + slot * NVMTL_TABLE_BYTES);
      nvmtl_bindtable *t = c->table;
@@ -2462,7 +2533,7 @@ index 89ceca8..3c197d1 100644
      }
      uint64_t self = nvmtl_vk_buffer_address(&page->buffer);
      if (!self) nvlog("address table: page has no device address - array_ref<void> arguments will read 0");
-@@ -2990,7 +3485,7 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
+@@ -2842,7 +3485,7 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
                                               VkDescriptorSet from, const uint64_t *copym);
  static VkDescriptorSet nvmtl_snapshot_set_m(nvk_cmdbuf *c, uint32_t which, uint32_t stex_hi, const uint64_t *mask, const uint64_t *tb)
  { return nvmtl_snapshot_set_md(c, which, stex_hi, mask, tb, VK_NULL_HANDLE, NULL); }
@@ -2471,7 +2542,7 @@ index 89ceca8..3c197d1 100644
  static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint32_t stex_hi, const uint64_t *mask, const uint64_t *tb,
                                               VkDescriptorSet from, const uint64_t *copym)
  {
-@@ -3074,45 +3569,51 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
+@@ -2926,45 +3569,51 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
      VkDescriptorImageInfo  dummyS = { g_dummySampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
      nvmtl_bindtable *t = (nvmtl_bindtable *)c->table;
      uint32_t nw = 0;
@@ -2559,7 +2630,7 @@ index 89ceca8..3c197d1 100644
      }
      if (stex_hi > NVMTL_NSTEX) stex_hi = NVMTL_NSTEX;
      for (uint32_t j = 0; j < stex_hi; j++) {
-@@ -3185,7 +3686,7 @@ static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const
+@@ -3037,7 +3686,7 @@ static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const
      for (int k = 0; k < 4; k++) m[k] = pm[k] | (live ? t->lastw[which][k] : 0);
      if (live && t->last_hi[which] > hi) hi = t->last_hi[which];
      VkDescriptorSet from = VK_NULL_HANDLE; uint64_t cm[4] = { 0, 0, 0, 0 };
@@ -2568,7 +2639,7 @@ index 89ceca8..3c197d1 100644
          from = t->last[which];
          for (int k = 0; k < 4; k++) cm[k] = t->lastw[which][k];
          for (uint32_t j = 0; j < NVMTL_NSTEX && NVMTL_STEX_BASE + j < 256; j++) {
-@@ -3211,7 +3712,7 @@ int nvmtl_vk_bind_buffer(nvk_cmdbuf *c, uint32_t set, uint32_t index, nvk_buffer
+@@ -3063,7 +3712,7 @@ int nvmtl_vk_bind_buffer(nvk_cmdbuf *c, uint32_t set, uint32_t index, nvk_buffer
      if (!b || !b->buf || offset >= b->size) { nvlog("bind buffer: offset %zu outside length %zu", offset, b ? b->size : 0); return -1; }
      int r = nvmtl_bind_slot(c, set, index, NVMTL_SLOT_BUF, b->buf, offset);
      if (!r) { nvmtl_bindtable *t = (nvmtl_bindtable *)c->table; nvmtl_slot *sl = &t->s[set][index]; uint64_t a = nvmtl_vk_buffer_address(b);
@@ -2577,7 +2648,27 @@ index 89ceca8..3c197d1 100644
                sl->size = b->size; sl->address = a; }
      return r;
  }
-@@ -3292,11 +3793,20 @@ static int nvmtl_fbfetch_on(void)
+@@ -3140,15 +3789,36 @@ static VkSampleLocationsInfoEXT nvmtl_sample_info(const nvmtl_sample_pattern *p,
+ #define NVMTL_FETCH_BINDING 192
+ static VkDescriptorSetLayout g_fetchLayout, g_emptyLayout;
+ static VkDescriptorPool g_fetchPools[64]; static unsigned g_nfetchPools;
++static int nvmtl_fbfetch_decide(uint16_t vendor, const char *pn, const char *off, const char *ws, const char *opt)
++{
++    const int is_ws = pn && !strcmp(pn, "WindowServer");
++    const int is_login_ui = pn && (!strcmp(pn, "SecurityAgent") || !strcmp(pn, "loginwindow")
++                                   || !strcmp(pn, "LockScreen") || !strcmp(pn, "efilogin-helper"));
++    const int is_amd = vendor == 0x1002;
++    if (off && off[0] == '1') return 0;
++    if (is_ws) {
++        if (ws && ws[0] == '0') return 0;
++        if (ws && ws[0] == '1') return 1;
++        return is_amd ? 1 : 0;
++    }
++    if (is_amd && is_login_ui) return 1;
++    if (is_amd) return (opt && opt[0] == '1') ? 1 : 0;
++    return 1;
++}
+ static int nvmtl_fbfetch_on(void)
  {
      static int on = -1;
      if (on < 0) {
@@ -2586,23 +2677,44 @@ index 89ceca8..3c197d1 100644
 -        on = !(off && off[0] == '1') && (!is_ws || (ws && ws[0] == '1'));
 +        const char *off = getenv("NVMTL_NO_FBFETCH"), *ws = getenv("NVMTL_FBFETCH_WS"), *opt = getenv("NVMTL_FBFETCH");
 +        const char *pn = getprogname();
++        const uint16_t vendor = nvmtl_vk_vendor();
 +        const int is_ws = pn && !strcmp(pn, "WindowServer");
-+        const int is_login_ui = pn && (!strcmp(pn, "SecurityAgent") || !strcmp(pn, "loginwindow")
-+                                       || !strcmp(pn, "LockScreen") || !strcmp(pn, "efilogin-helper"));
-+        const int is_amd = nvmtl_vk_vendor() == 0x1002;
-+        if (off && off[0] == '1') on = 0;
-+        else if (is_ws) on = (ws && ws[0] == '1') ? 1 : 0;
-+        else if (is_amd && is_login_ui) on = 1;
-+        else if (is_amd) on = (opt && opt[0] == '1') ? 1 : 0;
-+        else on = 1;
++        const int is_amd = vendor == 0x1002;
++        on = nvmtl_fbfetch_decide(vendor, pn, off, ws, opt);
          nvlog("vk: framebuffer fetch %s", on ? "ON - render passes declare their colour attachments as input attachments"
 -                                           : is_ws ? "off in WindowServer (NVMTL_FBFETCH_WS=1 opts in)" : "OFF (NVMTL_NO_FBFETCH=1)");
-+                                           : is_ws ? "off in WindowServer (NVMTL_FBFETCH_WS=1 opts in)"
-+                                           : is_amd ? "OFF by default on AMD (NVMTL_FBFETCH=1 opts in)" : "OFF (NVMTL_NO_FBFETCH=1)");
++                                           : (off && off[0] == '1') ? "OFF (NVMTL_NO_FBFETCH=1)"
++                                           : is_ws ? (is_amd ? "off in WindowServer (NVMTL_FBFETCH_WS=0)" : "off in WindowServer (NVMTL_FBFETCH_WS=1 opts in)")
++                                           : is_amd ? "OFF by default on AMD (NVMTL_FBFETCH=1 opts in)" : "OFF");
      }
      return on;
  }
-@@ -3742,17 +4252,15 @@ static uint32_t nvmtl_rt_shape(const nvk_pipeline *p, uint32_t cf[NVMTL_NCOL], u
+@@ -3200,6 +3870,8 @@ static void nvmtl_fetch_barrier(nvk_cmdbuf *c)
+ }
+ static VkDescriptorSet nvmtl_fetch_set(nvk_cmdbuf *c, uint32_t mask)
+ {
++    (void)mask;
++    if (c->fetch_set) return (VkDescriptorSet)c->fetch_set;
+     VkDescriptorSet set = VK_NULL_HANDLE; VkDescriptorPool pool = VK_NULL_HANDLE;
+     pthread_mutex_lock(&g_desc_lock);
+     VkResult r = VK_ERROR_OUT_OF_POOL_MEMORY;
+@@ -3227,7 +3899,6 @@ static VkDescriptorSet nvmtl_fetch_set(nvk_cmdbuf *c, uint32_t mask)
+     c->sets[c->nsets++] = (nvk_setref){ pool, set };   // freed with the command buffer's other sets
+     VkDescriptorImageInfo ii[NVMTL_NCOL]; VkWriteDescriptorSet w[NVMTL_NCOL]; uint32_t nw = 0;
+     for (uint32_t i = 0; i < NVMTL_NCOL; i++) {
+-        if (!(mask & (1u << i))) continue;
+         // A [[color(n)]] the pass has no attachment for reads the zeroed dummy image (Metal leaves that read undefined).
+         // Core Animation's fragment shaders declare color(0), color(1) and color(2) and draw in passes with one colour
+         // attachment: refusing those draws dropped every background fill, so in Terminal cleared screens, erased lines
+@@ -3241,6 +3912,7 @@ static VkDescriptorSet nvmtl_fetch_set(nvk_cmdbuf *c, uint32_t mask)
+         nw++;
+     }
+     if (nw) pvkUpdateDescriptorSets(g_dev, nw, w, 0, NULL);
++    c->fetch_set = (void *)set;
+     return set;
+ }
+ 
+@@ -3594,15 +4266,17 @@ static uint32_t nvmtl_rt_shape(const nvk_pipeline *p, uint32_t cf[NVMTL_NCOL], u
      for (uint32_t i = 0; i < n; i++) cf[i] = p->cfmts[i];
      return n;
  }
@@ -2617,14 +2729,32 @@ index 89ceca8..3c197d1 100644
      static int on = -1;
      if (on < 0) {
          const char *e = getenv("NVMTL_RP_LIGHT");
--        const int is_ws = getprogname() && !strcmp(getprogname(), "WindowServer");
--        if (!is_ws) on = 0;
--        else if (e && e[0] == '0') on = 0;
+-        on = e && e[0] == '1' && getprogname() && !strcmp(getprogname(), "WindowServer");
 +        if (e && e[0] == '0') on = 0;
-         else if (e && e[0] == '1') on = 1;
-         else on = (nvmtl_vk_vendor() == 0x1002) ? 1 : 0;
++        else if (e && e[0] == '1') on = 1;
++        else on = (nvmtl_vk_vendor() == 0x1002) ? 1 : 0;
          if (on) nvlog("render passes: entry dependency only (NVMTL_RP_LIGHT=1)");
-@@ -4577,6 +5085,7 @@ static VkPipeline nvmtl_compute_variant(nvk_pipeline *p, const uint32_t l[3])
+     }
+     return on;
+@@ -4250,7 +4924,7 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
+         VK_TRUE, VK_TRUE, VK_COMPARE_OP_LESS, VK_FALSE, VK_FALSE, { 0 }, { 0 }, 0.0f, 1.0f };
+     VkGraphicsPipelineCreateInfo gp = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, NULL, 0, nstages, stages,
+         &vi, &ia, td ? &tss : NULL, &vps, &rs, &ms, hasDepth ? &ds : NULL, &cb, &dsci, out->layout, out->rp, 0, VK_NULL_HANDLE, -1 };
+-    NVMTL_PIPELINE_STAGE(nvmtl_opaque_CreateGraphicsPipelines(g_dev, VK_NULL_HANDLE, 1, &gp, NULL, &out->pipe), "vkCreateGraphicsPipelines");
++    NVMTL_PIPELINE_STAGE(nvmtl_opaque_CreateGraphicsPipelines(g_dev, g_pipe_cache, 1, &gp, NULL, &out->pipe), "vkCreateGraphicsPipelines");
+     if (tcm) pvkDestroyShaderModule(g_dev, tcm, NULL);
+     if (tvm) pvkDestroyShaderModule(g_dev, tvm, NULL);
+     pvkDestroyShaderModule(g_dev, fmod, NULL);
+@@ -4364,7 +5038,7 @@ static int nvmtl_vk_compute_pipeline_create_g_lifetime_body(const void *cs, size
+     VkComputePipelineCreateInfo cpi = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0,
+         { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", NULL },
+         out->layout, VK_NULL_HANDLE, -1 };
+-    VKCK(nvmtl_opaque_CreateComputePipelines(g_dev, VK_NULL_HANDLE, 1, &cpi, NULL, &out->pipe), "vkCreateComputePipelines");
++    VKCK(nvmtl_opaque_CreateComputePipelines(g_dev, g_pipe_cache, 1, &cpi, NULL, &out->pipe), "vkCreateComputePipelines");
+     out->mod = mod;
+     return 0;
+ }
+@@ -4425,6 +5099,7 @@ static VkPipeline nvmtl_compute_variant(nvk_pipeline *p, const uint32_t l[3])
  {
      if (nvmtl_vk_tg_reject(l, NULL, "(variant)", p->lin)) return VK_NULL_HANDLE;
      if (!p->mod) return (VkPipeline)p->pipe;
@@ -2632,18 +2762,25 @@ index 89ceca8..3c197d1 100644
      VkPipeline found = VK_NULL_HANDLE;
      pthread_mutex_lock(&g_var_lock);
      for (uint32_t i = 0; i < p->nvar; i++) if (!memcmp(p->var[i].l, l, sizeof p->var[i].l)) { found = (VkPipeline)p->var[i].pipe; break; }
-@@ -4588,7 +5097,10 @@ static VkPipeline nvmtl_compute_variant(nvk_pipeline *p, const uint32_t l[3])
+@@ -4436,12 +5111,16 @@ static VkPipeline nvmtl_compute_variant(nvk_pipeline *p, const uint32_t l[3])
          VkComputePipelineCreateInfo cpi = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0,
              { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, (VkShaderModule)p->mod, "main", &si },
              (VkPipelineLayout)p->layout, VK_NULL_HANDLE, -1 };
+-        VkResult r = pvkCreateComputePipelines(g_dev, VK_NULL_HANDLE, 1, &cpi, NULL, &found);
 +        const int lock_cache = (g_pipe_cache != VK_NULL_HANDLE);
 +        if (lock_cache) pthread_mutex_lock(&g_pipe_cache_lock);
-         VkResult r = pvkCreateComputePipelines(g_dev, g_pipe_cache, 1, &cpi, NULL, &found);
++        VkResult r = pvkCreateComputePipelines(g_dev, g_pipe_cache, 1, &cpi, NULL, &found);
 +        if (lock_cache) pthread_mutex_unlock(&g_pipe_cache_lock);
          if (r != VK_SUCCESS) {
              if (found) pvkDestroyPipeline(g_dev, found, NULL);
              nvlog("vk: compute variant %ux%ux%u -> %d — this dispatch is SKIPPED", l[0], l[1], l[2], r); found = VK_NULL_HANDLE;
-@@ -4882,20 +5394,32 @@ int nvmtl_vk_cmd_begin(nvk_queue *q, nvk_cmdbuf *out)
+         }
+         else {
++            nvmtl_pipe_cache_note_compile();
+             if (p->nvar == p->capvar && p->capvar < NVMTL_NVAR_MAX) {
+                 uint32_t cap = p->capvar ? p->capvar * 2 : NVMTL_NVAR;
+                 struct nvmtl_cvar *g = realloc(p->var, cap * sizeof *g);
+@@ -4729,20 +5408,32 @@ int nvmtl_vk_cmd_begin(nvk_queue *q, nvk_cmdbuf *out)
      if (nvmtl_vk_init()) return nvmtl_cmd_refused(NVMTL_REFUSE_BACKEND_DOWN, 0);
      const uint64_t b0 = nvmtl_perf_now();
      memset(out, 0, sizeof *out);
@@ -2682,7 +2819,7 @@ index 89ceca8..3c197d1 100644
      if (pvkGetCalibratedTimestampsEXT && g_timestamp_bits) {
          VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_TIMESTAMP, 2, 0 };
          VkQueryPool timing = nvmtl_tspool_pop();
-@@ -4983,13 +5507,13 @@ static void nvmtl_clear_colour(VkClearColorValue *cv, uint32_t fmt, const float
+@@ -4830,13 +5521,13 @@ static void nvmtl_clear_colour(VkClearColorValue *cv, uint32_t fmt, const float
  static void nvmtl_private_depth_layout(nvk_cmdbuf *, nvk_image *, VkImageLayout);
  static int nvmtl_vk_cmd_begin_pass_impl(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
  {
@@ -2700,7 +2837,7 @@ index 89ceca8..3c197d1 100644
      if (ps->sample_pattern.count && !g_sample_locations) {
          /* No programmable-position backend: the pass draws at the standard positions. A pass asking for exactly those
             (what getDefaultSamplePositions returns) is plain MSAA. Any other pattern is drawn at the standard positions
-@@ -5004,20 +5528,20 @@ static int nvmtl_vk_cmd_begin_pass_impl(nvk_cmdbuf *c, const nvk_pass *ps, nvk_p
+@@ -4851,20 +5542,20 @@ static int nvmtl_vk_cmd_begin_pass_impl(nvk_cmdbuf *c, const nvk_pass *ps, nvk_p
      for (uint32_t i = 0; i < ncol; i++) {
          if (!cf[i]) continue;
          nvk_image *img = ps->col[i], *resolve = ps->res[i];
@@ -2728,7 +2865,7 @@ index 89ceca8..3c197d1 100644
          if (ps->ds->fmt != p->dfmt) { static int said; if (said++ < 4) nvlog("begin_render: apps2 depth: the pipeline's format %u on a format-%u texture (census)", p->dfmt, ps->ds->fmt); }
      }
      nvk_pass full;
-@@ -5110,7 +5634,7 @@ static int nvmtl_vk_cmd_begin_pass_impl(nvk_cmdbuf *c, const nvk_pass *ps, nvk_p
+@@ -4957,7 +5648,7 @@ static int nvmtl_vk_cmd_begin_pass_impl(nvk_cmdbuf *c, const nvk_pass *ps, nvk_p
      void *rpShape = NULL;
      if (p->samples > 1 && (prm != (rmask & ((1u << ncol) - 1u)) || dres)) {
          rpShape = nvmtl_rp_shape_variant(p, ps->load, prm, dres ? ps->dresmode : 0, dres ? ps->sresmode : 0);
@@ -2737,7 +2874,7 @@ index 89ceca8..3c197d1 100644
          static int said; if (said++ < 8) nvlog("begin_render: par1 %u-sample pass resolves colour 0x%x of 0x%x%s", p->samples, prm, rmask, dres ? " + depth/stencil" : "");
      }
      for (uint32_t i = 0; i < ncol; i++) if (cf[i]) { was = ps->col[i]->layout; break; }
-@@ -5130,7 +5654,14 @@ static int nvmtl_vk_cmd_begin_pass_impl(nvk_cmdbuf *c, const nvk_pass *ps, nvk_p
+@@ -4977,7 +5668,14 @@ static int nvmtl_vk_cmd_begin_pass_impl(nvk_cmdbuf *c, const nvk_pass *ps, nvk_p
      VkFramebufferCreateInfo fci = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, NULL, 0, rpShape ? (VkRenderPass)rpShape : p->rp,
          nviews, views, ps->w, ps->h, ps->layers > 1 ? ps->layers : 1 };
      VkFramebuffer fb = VK_NULL_HANDLE;
@@ -2753,7 +2890,7 @@ index 89ceca8..3c197d1 100644
      c->fb = fb;
      if (c->nfb == c->capfb) {
          unsigned cap = c->capfb ? c->capfb * 2 : 16;
-@@ -5141,6 +5672,7 @@ static int nvmtl_vk_cmd_begin_pass_impl(nvk_cmdbuf *c, const nvk_pass *ps, nvk_p
+@@ -4988,6 +5686,7 @@ static int nvmtl_vk_cmd_begin_pass_impl(nvk_cmdbuf *c, const nvk_pass *ps, nvk_p
      else {
  
          pvkDestroyFramebuffer(g_dev, fb, NULL); c->fb = NULL;
@@ -2761,7 +2898,24 @@ index 89ceca8..3c197d1 100644
          nvlog("vk: framebuffer retention allocation failed; pass refused");
          return -1;
      }
-@@ -5818,9 +6350,17 @@ static void nvmtl_cmd_retire(nvk_cmdbuf *c)
+@@ -5020,6 +5719,7 @@ static int nvmtl_vk_cmd_begin_pass_impl(nvk_cmdbuf *c, const nvk_pass *ps, nvk_p
+       } }
+     pvkCmdBeginRenderPass(c->cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+     c->in_rp = 1;
++    c->fetch_set = NULL;
+     for (uint32_t i = 0; i < NVMTL_NCOL; i++) c->fetchview[i] = (i < ncol && cf[i]) ? ps->colview[i] : NULL;
+     if (p->pipe) nvmtl_vk_cmd_bind_pipeline(c, p);
+     VkViewport vp = { 0, (float)ps->h, (float)ps->w, -(float)ps->h, 0, 1 }; VkRect2D sc = { { 0, 0 }, { ps->w, ps->h } };
+@@ -5622,7 +6322,7 @@ int nvmtl_pt_armed(void)
+     return g_pt_left > 0;
+ }
+ void nvmtl_vk_cmd_end_render(nvk_cmdbuf *c) {
+-    pvkCmdEndRenderPass(c->cb); c->in_rp = 0;
++    pvkCmdEndRenderPass(c->cb); c->in_rp = 0; c->fetch_set = NULL;
+     if (c->pt_open && c->pt_pool) { pvkCmdWriteTimestamp(c->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, (VkQueryPool)c->pt_pool, 2 * c->pt_n + 1); c->pt_n++; c->pt_open = 0; g_pt_left--; }
+     (void)nvmtl_counter_flush(c); }
+ 
+@@ -5665,9 +6365,17 @@ static void nvmtl_cmd_retire(nvk_cmdbuf *c)
      c->address_pages = NULL; c->address_count = 0;
      if (c->cb && c->pool) {
          VkCommandBuffer cb = (VkCommandBuffer)c->cb;
@@ -2782,7 +2936,7 @@ index 89ceca8..3c197d1 100644
      }
  }
  
-@@ -5835,7 +6375,7 @@ int nvmtl_vk_cmd_abandon(nvk_cmdbuf *c)
+@@ -5682,7 +6390,7 @@ int nvmtl_vk_cmd_abandon(nvk_cmdbuf *c)
  static pthread_mutex_t nvmtl_submit_mutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
  void (*nvmtl_pre_submit_hook)(void);
  void (*nvmtl_pre_release_hook)(void *);
@@ -2791,7 +2945,7 @@ index 89ceca8..3c197d1 100644
  static __thread nvmtl_prologue *g_pre_cur;
  static _Atomic unsigned long long g_pre_subs, g_pre_copies, g_pre_fills, g_pre_bytes, g_pre_fail;
  static int nvmtl_prologue_on(void)
-@@ -5885,6 +6425,58 @@ int nvmtl_vk_pre_fill(nvk_buffer *b, size_t offset, size_t size, uint32_t word)
+@@ -5732,6 +6440,58 @@ int nvmtl_vk_pre_fill(nvk_buffer *b, size_t offset, size_t size, uint32_t word)
      p->n++; p->fills++; p->bytes += size;
      return 0;
  }
@@ -2850,7 +3004,7 @@ index 89ceca8..3c197d1 100644
  void nvmtl_vk_pre_hold(void *retained)
  {
      nvmtl_prologue *p = g_pre_cur;
-@@ -5941,10 +6533,11 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
+@@ -5788,10 +6548,11 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
      nvmtl_subwho_note(who, 0);
      memset(f, 0, sizeof *f); f->c = c;
      uint64_t *const pt = f->pt;
@@ -2864,21 +3018,23 @@ index 89ceca8..3c197d1 100644
      c->timing.clock = nvmtl_clock_snapshot();
      c->timing.host_before_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
      if (c->timing_pool && !c->in_rp)
-@@ -5966,11 +6559,11 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
+@@ -5813,11 +6574,11 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
      }
      VkResult result = pvkEndCommandBuffer(c->cb);
      const uint64_t sB = nvmtl_perf_now();
 -    if (result != VK_SUCCESS) { nvmtl_cmd_retire(c); return -1; }
+-    VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO }; VkFence fence;
+-    result = pvkCreateFence(g_dev, &fci, NULL, &fence);
 +    if (result != VK_SUCCESS) { nvmtl_cmd_fail_note(c, "end_cb", (int)result); nvmtl_cmd_retire(c); return -1; }
-     VkFence fence = VK_NULL_HANDLE;
-     result = nvmtl_fence_acquire(&fence);
++    VkFence fence = VK_NULL_HANDLE;
++    result = nvmtl_fence_acquire(&fence);
      const uint64_t sC = nvmtl_perf_now();
 -    if (result != VK_SUCCESS) { nvmtl_cmd_retire(c); return -1; }
 +    if (result != VK_SUCCESS) { nvmtl_cmd_fail_note(c, "fence_acquire", (int)result); nvmtl_cmd_retire(c); return -1; }
      nvmtl_prologue *const pre = &f->pre;
      pthread_mutex_lock(&nvmtl_submit_mutex);
      if (pro && nvmtl_pre_submit_hook) {
-@@ -6001,10 +6594,20 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
+@@ -5848,10 +6609,21 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
      const uint64_t sE = nvmtl_perf_now();
      if (pt[0]) { pt[1] = pt[0] + (sA - pt[0]) + (sD - sC); pt[2] = pt[1] + (sB - sA) + (sE - sD); pt[3] = pt[2] + (sC - sB); }
      result = g_state == 1 ? pvkQueueSubmit(g_queue, 1, &si, fence) : VK_ERROR_DEVICE_LOST;
@@ -2896,10 +3052,11 @@ index 89ceca8..3c197d1 100644
      g_cmd_submitted++;
      if (result != VK_SUCCESS) {
 +        nvmtl_cmd_fail_note(c, "queue_submit", (int)result);
-         nvmtl_fence_release(fence, 0);
++        nvmtl_fence_release(fence, 0);
          g_state = -1;
          nvlog("vk: queue submit -> %d; disabling backend and retaining uncertain in-flight resources", result);
-@@ -6052,12 +6655,14 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
+         return -2;
+@@ -5898,12 +6670,14 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
              nvlog("vk: slowest submit so far %ld ms (budget %ld ms) - this is the wait the old 5 s watchdog called a dead device", waited_ms, budget_ms);
      }
      if (wr != VK_SUCCESS || g_state != 1) {
@@ -2914,7 +3071,16 @@ index 89ceca8..3c197d1 100644
              g_state = -1;
              nvlog("vk: completion witness missing; disabling backend and retaining all in-flight resources");
              return -2;
-@@ -6126,6 +6731,7 @@ static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b)
+@@ -5937,7 +6711,7 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
+         }
+         pvkDestroyQueryPool(g_dev, (VkQueryPool)c->pt_pool, NULL); c->pt_pool = NULL; c->pt_n = 0;
+     }
+-    pvkDestroyFence(g_dev, fence, NULL);
++    nvmtl_fence_release(fence, 1);
+     if (c->nsets > g_peak_sets) { g_peak_sets = c->nsets; nvlog("vk: commit high-water: %u descriptor sets = %u draws in one command buffer (%u pools open)", c->nsets, c->nsets / 2, g_ndescPools); }
+     if (c->nfb > g_peak_fbs) g_peak_fbs = c->nfb;
+     if (c->skipped) nvlog("vk: commit with %u draws/dispatches SKIPPED (no descriptor set could be allocated)", c->skipped);
+@@ -5972,6 +6746,7 @@ static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b)
      if (b->pool) pool_buffer_release(b);
      if (!b->placed && !b->imported && b->mem && b->map && pvkUnmapMemory) { pvkUnmapMemory(g_dev, (VkDeviceMemory)b->mem); b->map = NULL; }
      if (b->bar1) g_bar1_bytes -= b->alloc;
@@ -2922,7 +3088,7 @@ index 89ceca8..3c197d1 100644
      if (!b->placed && b->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)b->mem, NULL); g_alloc_bytes -= b->alloc; }
      memset(b, 0, sizeof *b);
  }
-@@ -6139,7 +6745,8 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b)
+@@ -5985,7 +6760,8 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b)
      const size_t n = b->size;
      nvk_buffer ev[NVMTL_BUFPARK_N + 1]; unsigned nev = 0;
      pthread_mutex_lock(&g_bpark_lock);
@@ -2932,7 +3098,7 @@ index 89ceca8..3c197d1 100644
          ev[nev++] = g_bpark[0]; g_bpark_bytes -= g_bpark[0].alloc;
          memmove(&g_bpark[0], &g_bpark[1], (g_bpark_n - 1) * sizeof g_bpark[0]); g_bpark_n--; }
      g_bpark[g_bpark_n++] = *b; g_bpark_bytes += b->alloc;
-@@ -6156,6 +6763,34 @@ void nvmtl_vk_image_destroy(nvk_image *i)
+@@ -6002,6 +6778,34 @@ void nvmtl_vk_image_destroy(nvk_image *i)
  {
      if (g_state != 1 || !i || !i->img) return;
      nvmtl_vk_image_upload_barrier(i);   // an async upload must finish before we free this image's memory (#96)
@@ -2967,7 +3133,7 @@ index 89ceca8..3c197d1 100644
      g_img_gone++;
      if (i->view) pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL);
      pvkDestroyImage(g_dev, (VkImage)i->img, NULL);
-@@ -6215,6 +6850,7 @@ void nvmtl_vk_res2_stats(uint64_t out[5]) { out[0] = g_res2_off; out[1] = g_res2
+@@ -6061,6 +6865,7 @@ void nvmtl_vk_res2_stats(uint64_t out[5]) { out[0] = g_res2_off; out[1] = g_res2
  int nvmtl_vk_vram_room(uint64_t want) { g_budget_stale = 1; return !nvmtl_vk_vram_wall0(want, NULL, NULL, NULL, NULL); }
  uint64_t nvmtl_vk_vram_free_now(void) { uint64_t f = 0; g_budget_stale = 1; (void)nvmtl_vk_vram_wall0(0, &f, NULL, NULL, NULL); return f; }
  uint64_t nvmtl_vk_vram_headroom(void) { return NVMTL_VRAM_HEADROOM; }
@@ -2975,7 +3141,7 @@ index 89ceca8..3c197d1 100644
  void nvmtl_vk_bindless_rewrite(uint32_t slot, void *view)
  {
      if (!g_heapSet || !slot || slot >= NVMTL_BINDLESS_SLOTS || !view) return;
-@@ -6351,8 +6987,15 @@ int nvmtl_vk_buffer_migrate(nvk_buffer *b, int to_sysmem)
+@@ -6197,8 +7002,15 @@ int nvmtl_vk_buffer_migrate(nvk_buffer *b, int to_sysmem)
      }
      pvkFreeMemory(g_dev, (VkDeviceMemory)b->mem, NULL);
      g_alloc_bytes -= b->alloc; g_alloc_bytes += mr.size;
@@ -2993,7 +3159,7 @@ index 89ceca8..3c197d1 100644
      b->mem = nm; b->alloc = mr.size; b->sysmem = to_sysmem ? 1 : 0;
      return 0;
  }
-@@ -6525,9 +7168,8 @@ int nvmtl_vk_image_read(nvk_queue *q, nvk_image *img, void *dst, size_t row_byte
+@@ -6371,9 +7183,8 @@ int nvmtl_vk_image_read(nvk_queue *q, nvk_image *img, void *dst, size_t row_byte
  // its buffer this way, from offset.
  int nvmtl_vk_image_host_xfer(nvk_queue *q, nvk_image *img, nvk_buffer *hb, size_t offset, size_t row_bytes, int to_image)
  {
@@ -3004,20 +3170,42 @@ index 89ceca8..3c197d1 100644
      if (!to_image) nvmtl_vk_image_upload_barrier(img);   // a readback must observe a pending async upload: finish it first
      nvk_cmdbuf c; if (nvmtl_vk_cmd_begin(q, &c)) return -1;
      VkImageSubresourceRange range = { nvmtl_barrier_aspect(img), 0, 1, 0, 1 };
-@@ -7139,7 +7781,11 @@ static int nvmtl_visibility_sum_init(void)
+@@ -6669,6 +7480,20 @@ void nvmtl_vk_cmd_barrier_c2c(nvk_cmdbuf *c)
+     pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                           0, 1, &mb, 0, NULL, 0, NULL);
+ }
++static void nvmtl_vk_cmd_barrier_to_transfer(nvk_cmdbuf *c)
++{
++    VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL,
++        VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT };
++    pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                          0, 1, &mb, 0, NULL, 0, NULL);
++}
++static void nvmtl_vk_cmd_barrier_from_transfer(nvk_cmdbuf *c)
++{
++    VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL,
++        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
++    pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
++                          0, 1, &mb, 0, NULL, 0, NULL);
++}
+ 
+ int nvmtl_vk_rt_available(void) { return nvmtl_vk_init() ? 0 : g_rt; }
+ 
+@@ -6971,7 +7796,12 @@ static int nvmtl_visibility_sum_init(void)
          VkComputePipelineCreateInfo pi = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0,
                                            stage, layout, VK_NULL_HANDLE, -1 };
          VkPipeline pipeline = VK_NULL_HANDLE;
--        if (pvkCreateComputePipelines(g_dev, g_pipe_cache, 1, &pi, NULL, &pipeline) == VK_SUCCESS) {
+-        if (pvkCreateComputePipelines(g_dev, VK_NULL_HANDLE, 1, &pi, NULL, &pipeline) == VK_SUCCESS) {
 +        const int lock_cache = (g_pipe_cache != VK_NULL_HANDLE);
 +        if (lock_cache) pthread_mutex_lock(&g_pipe_cache_lock);
 +        VkResult pcr = pvkCreateComputePipelines(g_dev, g_pipe_cache, 1, &pi, NULL, &pipeline);
 +        if (lock_cache) pthread_mutex_unlock(&g_pipe_cache_lock);
 +        if (pcr == VK_SUCCESS) {
-             nvmtl_pipe_cache_note_compile();
++            nvmtl_pipe_cache_note_compile();
              g_visibility_sum_layout = layout; g_visibility_sum_pipeline = pipeline; rc = 0;
          } else {
-@@ -7259,7 +7905,7 @@ typedef struct {
+             if (pipeline) pvkDestroyPipeline(g_dev, pipeline, NULL);
+@@ -7090,7 +7920,7 @@ typedef struct {
      unsigned reset_ended;
  } nvmtl_counter_recording;
  
@@ -3026,7 +3214,91 @@ index 89ceca8..3c197d1 100644
  static void nvmtl_counter_memory_barrier(nvk_cmdbuf *c)
  {
      VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL,
-@@ -7613,19 +8259,53 @@ static int nvmtl_vk_heap_create_body(size_t size, int host_visible, nvk_heap *ou
+@@ -7260,27 +8090,31 @@ int nvmtl_vk_gpu_timestamp(uint64_t *cpu_ns, uint64_t *gpu)
+ uint64_t nvmtl_vk_buffer_address(nvk_buffer *b)
+ {
+     if (!b || !b->buf || !pvkGetBufferDeviceAddress) return 0;
++    uint64_t cached = __atomic_load_n(&b->bda, __ATOMIC_RELAXED);
++    if (cached) return cached;
+     VkBufferDeviceAddressInfo i = { VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, NULL, (VkBuffer)b->buf };
+-    return pvkGetBufferDeviceAddress(g_dev, &i);
++    uint64_t addr = pvkGetBufferDeviceAddress(g_dev, &i);
++    if (addr) __atomic_store_n(&b->bda, addr, __ATOMIC_RELAXED);
++    return addr;
+ }
+ 
+ int nvmtl_vk_cmd_fill_buffer(nvk_cmdbuf *c, nvk_buffer *b, size_t offset, size_t size, uint8_t value)
+ {
+     if (!size) return 0;
+     if ((offset | size) & 3 || offset > b->size || size > b->size - offset) return -1;
+-    nvmtl_vk_cmd_barrier(c);
++    nvmtl_vk_cmd_barrier_to_transfer(c);
+     uint32_t word = value; word |= word << 8; word |= word << 16;
+     pvkCmdFillBuffer(c->cb, (VkBuffer)b->buf, offset, size, word);
+-    nvmtl_vk_cmd_barrier(c);
++    nvmtl_vk_cmd_barrier_from_transfer(c);
+     return 0;
+ }
+ 
+ int nvmtl_vk_cmd_write_word(nvk_cmdbuf *c, nvk_buffer *b, size_t offset, uint32_t word)
+ {
+     if ((offset & 3) || offset > b->size || b->size - offset < 4) return -1;
+-    nvmtl_vk_cmd_barrier(c);
++    nvmtl_vk_cmd_barrier_to_transfer(c);
+     pvkCmdFillBuffer(c->cb, (VkBuffer)b->buf, offset, 4, word);
+-    nvmtl_vk_cmd_barrier(c);
++    nvmtl_vk_cmd_barrier_from_transfer(c);
+     return 0;
+ }
+ 
+@@ -7288,10 +8122,10 @@ int nvmtl_vk_cmd_copy_buffer(nvk_cmdbuf *c, nvk_buffer *src, size_t srcOff, nvk_
+ {
+     if (!size) return 0;
+     if (srcOff > src->size || size > src->size-srcOff || dstOff > dst->size || size > dst->size-dstOff) return -1;
+-    nvmtl_vk_cmd_barrier(c);
++    nvmtl_vk_cmd_barrier_to_transfer(c);
+     VkBufferCopy bc = { srcOff, dstOff, size };
+     pvkCmdCopyBuffer(c->cb, (VkBuffer)src->buf, (VkBuffer)dst->buf, 1, &bc);
+-    nvmtl_vk_cmd_barrier(c);
++    nvmtl_vk_cmd_barrier_from_transfer(c);
+     return 0;
+ }
+ 
+@@ -7319,7 +8153,7 @@ int nvmtl_vk_cmd_copy_buffer_to_image_level_layer(nvk_cmdbuf *c, nvk_buffer *b,
+     if (layer >= (img->layers ? img->layers : 1) || !w || !h || x > lw || w > lw-x || y > lh || h > lh-y
+         || row_bytes < tight || row_bytes % bpp || off > b->size || (uint64_t)(rows-1)*row_bytes+tight > b->size-off) return -1;
+     if (!w || !h || x + w > lw || y + h > lh) { nvlog("copy_buffer_to_image: out of bounds (level %u is %ux%u)", level, lw, lh); return -1; }
+-    nvmtl_vk_cmd_barrier(c);
++    nvmtl_vk_cmd_barrier_to_transfer(c);
+     img_to(c, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+     VkBufferImageCopy bic = { off, row_bytes / bpp * bw, 0, { nvmtl_copy_aspect(img), level, img->mtl_type == 7 ? 0u : layer, 1 },
+@@ -7327,7 +8161,7 @@ int nvmtl_vk_cmd_copy_buffer_to_image_level_layer(nvk_cmdbuf *c, nvk_buffer *b,
+     pvkCmdCopyBufferToImage(c->cb, (VkBuffer)b->buf, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
+     img_to(c, img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+-    nvmtl_vk_cmd_barrier(c);
++    nvmtl_vk_cmd_barrier_from_transfer(c);
+     return 0;
+ }
+ 
+@@ -7347,14 +8181,8 @@ int nvmtl_vk_cmd_copy_image_to_buffer_level_layer(nvk_cmdbuf *c, nvk_image *img,
+     if (bw > 1 && ((x % bw) || (y % bh))) { nvlog("copy: origin (%u,%u) is not block-aligned", x, y); return -1; }
+     if (layer >= (img->layers ? img->layers : 1) || !w || !h || x > lw || w > lw-x || y > lh || h > lh-y
+         || row_bytes < tight || row_bytes % bpp || off > b->size || (uint64_t)(rows-1)*row_bytes+tight > b->size-off) return -1;
+-    if (!w || !h || x + w > lw || y + h > lh) { nvlog("copy_image_to_buffer: out of bounds (level %u is %ux%u)", level, lw, lh); return -1; }
+-    nvmtl_vk_cmd_barrier(c);
+-    img_to(c, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+-           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+-    VkBufferImageCopy bic = { off, row_bytes / bpp * bw, 0, { nvmtl_copy_aspect(img), level, img->mtl_type == 7 ? 0u : layer, 1 },
+-                              { (int32_t)x, (int32_t)y, img->mtl_type == 7 ? (int32_t)layer : 0 }, { w, h, 1 } };
+     pvkCmdCopyImageToBuffer(c->cb, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, (VkBuffer)b->buf, 1, &bic);
+-    nvmtl_vk_cmd_barrier(c);
++    nvmtl_vk_cmd_barrier_from_transfer(c);
+     return 0;
+ }
+ 
+@@ -7440,19 +8268,53 @@ static int nvmtl_vk_heap_create_body(size_t size, int host_visible, nvk_heap *ou
      VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &mafi, size, (uint32_t)mt };
      VkDeviceMemory mem = VK_NULL_HANDLE;
      { uint64_t hbud = 0, hused = 0, hfree = 0; int hmeas = 0;
@@ -3089,7 +3361,7 @@ index 89ceca8..3c197d1 100644
        }
        if (r_ != VK_SUCCESS) { nvlog("vk: vkAllocateMemory(placement heap) -> %d", r_); return -1; } }
      out->mem = mem; out->memtype = (uint32_t)mt;
-@@ -7690,9 +8370,21 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
+@@ -7517,9 +8379,21 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
          nvlog("buffer texture: bytesPerRow %zu cannot hold %u texels of %u B", row_pitch, w, bpp); return -1; }
      if (g_linmod && row_pitch % 32) {
          nvlog("buffer texture: bytesPerRow %zu is not a multiple of 32 B (the texture header's linear pitch unit)", row_pitch); return -1; }
@@ -3112,7 +3384,7 @@ index 89ceca8..3c197d1 100644
      VkFormatProperties fp; memset(&fp, 0, sizeof fp);
      if (gfp) gfp(g_pdev, (VkFormat)vkfmt, &fp);
      VkFormatFeatureFlags lf = fp.linearTilingFeatures;
-@@ -7718,7 +8410,7 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
+@@ -7545,12 +8419,14 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
      if (vp) {
          VkFormatProperties pp; memset(&pp, 0, sizeof pp); if (gfp) gfp(g_pdev, (VkFormat)vp, &pp);
          PFN_vkGetPhysicalDeviceImageFormatProperties2 gif = (PFN_vkGetPhysicalDeviceImageFormatProperties2)
@@ -3121,7 +3393,15 @@ index 89ceca8..3c197d1 100644
          VkImageFormatListCreateInfo qfl = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO, NULL, 2, vfl };
          VkPhysicalDeviceImageDrmFormatModifierInfoEXT qmi = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT, &qfl,
              0 , VK_SHARING_MODE_EXCLUSIVE, 0, NULL };
-@@ -7735,7 +8427,7 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
+         VkPhysicalDeviceImageFormatInfo2 qi = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2, g_linmod ? (void *)&qmi : (void *)&qfl,
+-            ici.format, ici.imageType, ici.tiling, ici.usage, VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT };
++            ici.format, ici.imageType, ici.tiling,
++            ici.usage | ((ici.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) && nvmtl_fbfetch_on() ? VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT : 0),
++            VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT };
+         VkImageFormatProperties2 qo; memset(&qo, 0, sizeof qo); qo.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2;
+         VkResult qr = !(pp.linearTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) ? VK_ERROR_FORMAT_NOT_SUPPORTED
+                     : gif ? gif(g_pdev, &qi, &qo) : VK_ERROR_EXTENSION_NOT_PRESENT;
+@@ -7562,7 +8438,7 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
      out->layout = VK_IMAGE_LAYOUT_PREINITIALIZED;
      out->vkflags = (uint32_t)ici.flags; out->usage = (uint32_t)ici.usage; out->vpair = vp;
      if (!g_linmod) {
@@ -3130,17 +3410,7 @@ index 89ceca8..3c197d1 100644
          VkImageSubresource sr = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 }; VkSubresourceLayout got; memset(&got, 0, sizeof got);
          if (gsl) gsl(g_dev, (VkImage)out->img, &sr, &got);
          if (!gsl || got.rowPitch != row_pitch || got.offset) {
-@@ -7758,6 +8450,9 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
-     if (mr.size > b->size - offset)
-         nvlog("buffer texture: image size %llu runs %llu B past the buffer's %zu at offset %zu (the tail of the last row, never addressed)",
-               (unsigned long long)mr.size, (unsigned long long)(mr.size - (b->size - offset)), b->size, offset);
-+    if (mr.size > b->size - offset)
-+        nvlog("buffer texture: image size %llu runs %llu B past the buffer's %zu at offset %zu (the tail of the last row, never addressed)",
-+              (unsigned long long)mr.size, (unsigned long long)(mr.size - (b->size - offset)), b->size, offset);
-     VKCK(pvkBindImageMemory(g_dev, (VkImage)out->img, (VkDeviceMemory)b->mem, at), "vkBindImageMemory(buffer texture)");
-     out->mem = b->mem; out->placed = 1; out->alloc = 0;
-     VkComponentMapping swz = a8 ? (VkComponentMapping){ VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_R }
-@@ -7876,13 +8571,24 @@ static int pool_buffer_create_in(int vram, size_t size, nvk_buffer *out)
+@@ -7703,13 +8579,24 @@ static int pool_buffer_create_in(int vram, size_t size, nvk_buffer *out)
          // double the pool each time, so a busy process still reaches the cap in a few steps.
          size_t have = 0; for (pool_block *p = *head; p; p = p->next) have += p->heap.size;
          const size_t cap = vram ? NVMTL_VPOOL_BLOCK : NVMTL_POOL_BLOCK, bs = have < NVMTL_POOL_FIRST ? NVMTL_POOL_FIRST : have > cap ? cap : have;
@@ -3168,7 +3438,7 @@ index 89ceca8..3c197d1 100644
      }
      blk->nlive++; g_pool_live++; g_pool_bytes += len;
      pthread_mutex_unlock(&g_pool_lock);
-@@ -7898,6 +8604,37 @@ static int pool_buffer_create_in(int vram, size_t size, nvk_buffer *out)
+@@ -7725,6 +8612,37 @@ static int pool_buffer_create_in(int vram, size_t size, nvk_buffer *out)
          (unsigned long long)g_pool_blocks, (unsigned long long)g_pool_live, (unsigned long long)g_pool_bytes);
      return 0;
  }
@@ -3206,7 +3476,7 @@ index 89ceca8..3c197d1 100644
  static int pool_buffer_create(size_t size, nvk_buffer *out) { return pool_buffer_create_in(0, size, out); }
  static void pool_buffer_release(nvk_buffer *b)
  {
-@@ -7954,7 +8691,9 @@ static int nvmtl_vk_image_create_typed_placed_lifetime_body(uint32_t w, uint32_t
+@@ -7781,7 +8699,9 @@ static int nvmtl_vk_image_create_typed_placed_lifetime_body(uint32_t w, uint32_t
          (out->bw > 1 ? 0 : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
          VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | (storage ? VK_IMAGE_USAGE_STORAGE_BIT : 0),
          VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED };
@@ -3218,14 +3488,14 @@ index 89ceca8..3c197d1 100644
      VkMemoryRequirements mr; pvkGetImageMemoryRequirements(g_dev, out->img, &mr);
      if (placed_ok(&mr, heap, offset, "placed image")) { pvkDestroyImage(g_dev, (VkImage)out->img, NULL); memset(out, 0, sizeof *out); return -1; }
 diff --git a/src/nmplugin/nvmtl_vk.h b/src/nmplugin/nvmtl_vk.h
-index e634db9..601ca7e 100644
+index fd2791e..97ef36d 100644
 --- a/src/nmplugin/nvmtl_vk.h
 +++ b/src/nmplugin/nvmtl_vk.h
 @@ -8,9 +8,9 @@
  #include <stdint.h>
  #include <stddef.h>
  const char *nvmtl_image_ident(const void *addr, char *out, size_t n);
--typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int placed; void *pool; size_t poff; int imported; int bar1; size_t moff; int sparse, sysmem; int htype; /* its memory type + 1 when known (0 = unknown) */ uint64_t bda; } nvk_buffer;
+-typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int placed; void *pool; size_t poff; int imported; int bar1; size_t moff; int sparse, sysmem; int htype; /* its memory type + 1 when known (0 = unknown) */ } nvk_buffer;
 +typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int placed; void *pool; size_t poff; int imported; int bar1; size_t moff; int sparse, sysmem; int htype; /* its memory type + 1 when known (0 = unknown) */ uint8_t vram_acct; uint64_t bda; } nvk_buffer;
  #include "nvmtl_sample_positions.h"
 -typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; uint32_t layout; uint32_t mips; uint32_t fmt, bpp; uint32_t storage, mtl_type, layers; int placed; uint32_t bw, bh; uint32_t samples; uint32_t sysmem; uint32_t vkflags, usage;  uint32_t vpair;  uint64_t up_token; } nvk_image;
@@ -3233,7 +3503,15 @@ index e634db9..601ca7e 100644
  #define NVMTL_NVAR 16
  #define NVMTL_NVAR_MAX 4096
  #define NVMTL_NCOL 8
-@@ -77,6 +77,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
+@@ -67,6 +67,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
+                  void *dcache[32]; void *dcachepool; unsigned ndcache;
+                  unsigned in_rp, occlusion_reset; uint32_t wseq;
+                  void *fetchview[NVMTL_NCOL];   /* the open pass's colour views, read by [[color(n)]] framebuffer fetch */
++                 void *fetch_set;               /* cached per-render-pass input-attachment VkDescriptorSet */
+                  unsigned fetch_draw, topo;   /* the bound pipeline reads [[color(n)]] in this pass; last MTLPrimitiveType set */
+                  /* stencil export emulation (nvmtl_semu_draw): the bound pipeline's layout when it exports stencil, and the
+                     stencil reference / write masks / depth write last set, which each per-bit pass changes and restores */
+@@ -77,6 +78,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                   void *timing_pool; nvmtl_gpu_interval timing;
                   void *pt_pool; unsigned pt_n, pt_open; uint32_t pt_w[128], pt_h[128], pt_f[128]; uint32_t pt_fs[128][4];
                   void *counter_recording; unsigned encoding_error;
@@ -3241,7 +3519,7 @@ index e634db9..601ca7e 100644
                   nvmtl_sample_pattern sample_pattern;
                   void **rvs; unsigned nrv, caprv;
                   unsigned restart_off;  /* GL turned primitive restart off (setPrimitiveRestartEnabled:NO) */
-@@ -196,6 +197,8 @@ void nvmtl_vk_image_free_backing(nvk_image *old);
+@@ -196,6 +198,8 @@ void nvmtl_vk_image_free_backing(nvk_image *old);
  int nvmtl_vk_vram_room(uint64_t want);
  uint64_t nvmtl_vk_vram_free_now(void);
  uint64_t nvmtl_vk_vram_headroom(void);
@@ -3250,7 +3528,7 @@ index e634db9..601ca7e 100644
  void nvmtl_vk_bindless_rewrite(uint32_t slot, void *view);
  void nvmtl_vk_res2_stats(uint64_t out[5]);
  int nvmtl_vk_buffer_migrate(nvk_buffer *b, int to_sysmem);
-@@ -208,11 +211,16 @@ void nvmtl_vk_gsub_nvk_stats(uint64_t *out, unsigned n);
+@@ -208,11 +212,16 @@ void nvmtl_vk_gsub_nvk_stats(uint64_t *out, unsigned n);
  int nvmtl_vk_pre_open(void);
  int nvmtl_vk_pre_copy(nvk_buffer *src, size_t srcOff, nvk_buffer *dst, size_t dstOff, size_t size);
  int nvmtl_vk_pre_fill(nvk_buffer *b, size_t offset, size_t size, uint32_t word);
@@ -3267,7 +3545,7 @@ index e634db9..601ca7e 100644
  int  nvmtl_vk_image_write(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes);
  int  nvmtl_vk_copy_buffer(nvk_queue *q, nvk_buffer *src, size_t srcOff, nvk_buffer *dst, size_t dstOff, size_t size);
  int  nvmtl_vk_image_create_mips(uint32_t w, uint32_t h, int bgra, uint32_t mips, nvk_image *out);
-@@ -308,6 +316,7 @@ void nvmtl_vk_queue_destroy(nvk_queue *q);
+@@ -308,6 +317,7 @@ void nvmtl_vk_queue_destroy(nvk_queue *q);
  size_t nvmtl_vk_allocated_bytes(void);
  uint64_t nvmtl_vk_buffer_address(nvk_buffer *b);
  
@@ -3275,3 +3553,914 @@ index e634db9..601ca7e 100644
  int nvmtl_vk_image_create_typed(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out);
  typedef struct { void *mem; void *map; size_t size; uint32_t memtype; int host_visible; } nvk_heap;
  int  nvmtl_vk_heap_create(size_t size, int host_visible, nvk_heap *out);
+diff --git a/tests/test_native_p1_perf.py b/tests/test_native_p1_perf.py
+new file mode 100644
+index 0000000..6c4668a
+--- /dev/null
++++ b/tests/test_native_p1_perf.py
+@@ -0,0 +1,905 @@
++"""Host unit tests for P1 CPU load reduction and GPU pipeline optimizations."""
++import pathlib
++import subprocess
++import tempfile
++import unittest
++
++from test_native_bo_lifetime import method
++
++ROOT = pathlib.Path(__file__).resolve().parents[1]
++
++
++class NativeP1PerfTest(unittest.TestCase):
++    def test_bringup_p1_batch_vm_single_hdp_decoupled_wait_and_bo_free(self):
++        source = (ROOT / 'src/phxbringup/PhxBringup.cpp').read_text()
++        code = r'''
++#include <cassert>
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++#include "phxbringup/PhxNativeABI.h"
++#include "phxbringup/PhxGpuQueue.h"
++#include "phxbringup/PhxPendingFences.h"
++#include "phxbringup/PhxRange.h"
++#include "phxbringup/PhxVaMaps.h"
++
++using IOReturn = int;
++using IOByteCount = uint64_t;
++using addr64_t = uint64_t;
++constexpr int kIOReturnSuccess = 0, kIOReturnBadArgument = 1, kIOReturnNotReady = 2;
++constexpr int kIOReturnVMError = 3, kIOReturnNoMemory = 4, kIOReturnNotFound = 5, kIOReturnTimeout = 6;
++constexpr int kIOReturnUnsupported = 7, kIOReturnNoResources = 8, kIOReturnBusy = 9, kIOReturnNotOpen = 10;
++constexpr int kIOMemoryMapperNone = 0, kMaxMaps = 64;
++constexpr uint64_t kPtAddrMask = 0x0000FFFFFFFFF000ull;
++constexpr uint64_t kPteSysFlags = 0x77ull | (4ull << 48);
++constexpr uint64_t kVaMask = (1ull << 48) - 1;
++constexpr uint32_t kFirstUserVmid = 8, kMaxCtx = 16;
++
++struct Lock { bool held = false; };
++static void IOLockLock(Lock *l) { assert(!l->held); l->held = true; }
++static void IOLockUnlock(Lock *l) { assert(l->held); l->held = false; }
++void bzero(void *p, size_t n) { std::memset(p, 0, n); }
++void bcopy(const void *s, void *d, size_t n) { std::memmove(d, s, n); }
++template<class... T> static void IOLog(const char *, T...) {}
++
++static unsigned gFlushLineCalls = 0;
++static void flushLine(const volatile void *) { gFlushLineCalls++; }
++static void IODelay(unsigned) {}
++static void IOSleep(unsigned) {}
++static void *IOMallocZero(size_t n) { return std::calloc(1, n); }
++static void IOFree(void *p, size_t) { std::free(p); }
++
++class IOMemoryDescriptor {
++public:
++    uint64_t len{65536};
++    uint64_t segLen{4096};
++    unsigned segCalls{0};
++    unsigned refs{1};
++    uint64_t getLength() const { return len; }
++    addr64_t getPhysicalSegment(uint64_t off, IOByteCount *outLen, int) {
++        segCalls++;
++        *outLen = segLen;
++        return 0x20000000ull + off;
++    }
++    void retain() { refs++; }
++    void release() { assert(refs); refs--; }
++};
++
++static bool vaCanonical(uint64_t va) {
++    uint64_t top = va >> 47;
++    return top == 0 || top == 0x1FFFF;
++}
++
++struct PhxBringup {
++    static constexpr uint32_t kPtReserveCap = 516;
++    struct VmCtx {
++        bool busy = true;
++        uint32_t hw = 8;
++        alignas(64) uint64_t l0[4][512]{};
++        bool l0Allocated[4]{true, false, false, false};
++    } vm[kMaxCtx];
++    struct HwVmid { uint32_t ctx = 1; uint64_t lastSeq = 0, lastUse = 0, binding = 1; } hwv[8];
++    using GpuQueue = PhxGpuQueue;
++    GpuQueue gq[2]{};
++    struct Aper {
++        alignas(64) uint8_t mem[8192]{};
++        uintptr_t getVirtualAddress() { return reinterpret_cast<uintptr_t>(mem); }
++    } aper, db;
++    Aper *fbAper = &aper, *doorbellMap = &db;
++    Lock mutex;
++    Lock *gpuLock = &mutex;
++    uint64_t gSeq = 0, fbMcBase = 0x8000000000ull;
++    bool stopped = false, sleeping = false, fault = false, ready = true;
++    unsigned refills = 0, pteLookups = 0, tlbFlushes = 0, hdpFlushes = 0, packetWrites = 0;
++
++    bool isStopped() const { return stopped; }
++    bool isGpuSleeping() const { return sleeping; }
++    bool vmHealthy() const { return !fault; }
++    bool gpuReady() const { return ready; }
++    bool debugEnabled() const { return false; }
++    uint8_t queueIndexFor(bool gfx) const { return gfx ? (gq[1].ready ? 1u : 0u) : (gq[0].ready ? 0u : 1u); }
++    void ptRefillReserve(uint32_t) { refills++; }
++    VmCtx *vmCtx(uint32_t h) { return h && h <= kMaxCtx && vm[h - 1].busy ? &vm[h - 1] : nullptr; }
++    bool vmFlushTlb(uint32_t) { assert(gpuLock->held); tlbFlushes++; return true; }
++    uint32_t vmBind(uint32_t handle) { return vm[handle - 1].hw ? vm[handle - 1].hw : 8; }
++    void ringPut(GpuQueue &, uint32_t, uint32_t) { packetWrites++; }
++    void hdpFlush() { hdpFlushes++; }
++    uint64_t queueFence(const GpuQueue &q) const {
++        const volatile uint32_t *f = reinterpret_cast<const volatile uint32_t *>(aper.mem + q.fenceOff);
++        return phxReadFence64(f);
++    }
++    uint64_t *vmPte(VmCtx &c, uint64_t va, bool alloc) {
++        assert(gpuLock->held);
++        pteLookups++;
++        uint32_t tbl = static_cast<uint32_t>(va >> 21);
++        assert(tbl < 4);
++        if (!c.l0Allocated[tbl]) {
++            if (!alloc) return nullptr;
++            c.l0Allocated[tbl] = true;
++        }
++        return &c.l0[tbl][(va >> 12) & 511];
++    }
++    uint64_t gpuRetired() const { return gpuRetiredMask(0x3); }
++    uint64_t gpuRetiredMask(uint8_t queueMask) const;
++    uint64_t gpuRetiredLockedMask(uint8_t queueMask) const;
++    IOReturn vmMap(uint32_t handle, uint64_t va, IOMemoryDescriptor *md, uint64_t off, uint64_t size);
++    IOReturn vmUnmap(uint32_t handle, uint64_t va, uint64_t size);
++    IOReturn gpuSubmit(uint32_t handle, bool gfx, const uint64_t *ibVa, const uint32_t *ibDw, uint32_t n, uint64_t *seqOut);
++};
++
++struct IOExternalMethodArguments {
++    uint32_t scalarInputCount{0}, scalarOutputCount{0};
++    uint32_t structureInputSize{0}, structureOutputSize{0};
++    void *structureInputDescriptor{nullptr}, *structureOutputDescriptor{nullptr};
++    const void *structureInput{nullptr};
++    uint64_t scalarInput[4]{}, scalarOutput[4]{};
++};
++static bool shape(const IOExternalMethodArguments *a, uint32_t si, uint32_t so, uint32_t sti, uint32_t sto) {
++    return a->scalarInputCount == si && a->scalarOutputCount == so &&
++           a->structureInputSize == sti && a->structureOutputSize == sto;
++}
++
++struct IOAccelPhxNativeClient {
++    struct Bo { IOMemoryDescriptor *md = nullptr; uint64_t size = 65536; uint32_t domain = 2, bits = 0; uint8_t *kva = nullptr; bool host = false; } bo[4];
++    using Map = PhxVaMap;
++    Map maps[kMaxMaps]{};
++    int mapCount = 0;
++    PhxBringup *owner = nullptr;
++    Lock clientMutex;
++    Lock *lock = &clientMutex;
++    bool hello = true, closing = false;
++    bool ctx[PHXN_MAX_CTX + 1]{};
++    uint32_t vmid = 1;
++    uint64_t emitted = 0, lastSeq = 0;
++    uint64_t visUsed = 0, hiUsed = 0, gttUsed = 65536, hostUsed = 0;
++    uint64_t lastSeqByQueue[2]{0, 0};
++    struct SeqQueue { uint64_t seq; uint8_t qi; } seqQueues[64]{};
++    uint32_t seqQueueHead = 0;
++    uint64_t lastRetiredFencesArg = ~0ull;
++    unsigned retireCalls = 0, waitIdleCalls = 0, flushCalls = 0;
++    PhxPendingFences pendingFences;
++
++    IOAccelPhxNativeClient() { ctx[1] = true; }
++    uint8_t queueMaskForTarget(uint64_t target) const {
++        for (uint32_t i = 0; i < 64; i++) {
++            if (seqQueues[i].seq == target)
++                return static_cast<uint8_t>(1u << seqQueues[i].qi);
++        }
++        uint8_t mask = 0;
++        if (lastSeqByQueue[0]) mask |= 1u;
++        if (lastSeqByQueue[1]) mask |= 2u;
++        return mask ? mask : 0x3u;
++    }
++    Bo *findBo(uint32_t h) { return h && h < 4 && bo[h].md ? &bo[h] : nullptr; }
++    void boRelease(Bo &b) { b.md = nullptr; b = Bo{}; }
++    bool ensureVmid() { return true; }
++    void flushBos() { flushCalls++; }
++    void retireFences(uint64_t r, bool = true) { retireCalls++; lastRetiredFencesArg = r; }
++    bool waitIdle() {
++        waitIdleCalls++;
++        return owner->gpuRetired() >= lastSeq;
++    }
++    IOReturn doBoFree(IOExternalMethodArguments *a);
++    IOReturn doGemVa(IOExternalMethodArguments *a);
++    bool ibCovered(uint64_t vaCanon, uint64_t bytes);
++    IOReturn doSubmit(IOExternalMethodArguments *a);
++    IOReturn doWaitSeq(IOExternalMethodArguments *a);
++};
++'''
++        for s in (
++            'IOReturn PhxBringup::vmMap(',
++            'IOReturn PhxBringup::vmUnmap(',
++            'uint64_t PhxBringup::gpuRetiredMask(',
++            'uint64_t PhxBringup::gpuRetiredLockedMask(',
++            'IOReturn PhxBringup::gpuSubmit(',
++            'IOReturn IOAccelPhxNativeClient::doBoFree(',
++            'IOReturn IOAccelPhxNativeClient::doGemVa(',
++            'bool IOAccelPhxNativeClient::ibCovered(',
++            'IOReturn IOAccelPhxNativeClient::doSubmit(',
++            'IOReturn IOAccelPhxNativeClient::doWaitSeq(',
++        ):
++            code += method(source, s)
++
++        code += r'''
++static void setFence(PhxBringup &br, uint32_t off, uint64_t val) {
++    br.aper.mem[off + 0] = static_cast<uint8_t>(val & 0xff);
++    br.aper.mem[off + 1] = static_cast<uint8_t>((val >> 8) & 0xff);
++    br.aper.mem[off + 2] = static_cast<uint8_t>((val >> 16) & 0xff);
++    br.aper.mem[off + 3] = static_cast<uint8_t>((val >> 24) & 0xff);
++    br.aper.mem[off + 4] = static_cast<uint8_t>((val >> 32) & 0xff);
++    br.aper.mem[off + 5] = static_cast<uint8_t>((val >> 40) & 0xff);
++    br.aper.mem[off + 6] = static_cast<uint8_t>((val >> 48) & 0xff);
++    br.aper.mem[off + 7] = static_cast<uint8_t>((val >> 56) & 0xff);
++}
++
++int main() {
++    // 1. Batched vmMap across 64 KiB contiguous segment -> 1 seg lookup, 1 vmPte lookup, 2 cache-line flushes.
++    PhxBringup owner;
++    IOMemoryDescriptor md;
++    md.len = 65536;
++    md.segLen = 65536;
++    gFlushLineCalls = 0;
++    assert(owner.vmMap(1, 0x100000, &md, 0, 65536) == kIOReturnSuccess);
++    assert(md.segCalls == 1);
++    assert(owner.pteLookups == 1);
++    assert(gFlushLineCalls == 2); // 16 * 8B = 128B = 2 cache lines
++    for (int i = 0; i < 16; i++)
++        assert((owner.vm[0].l0[0][256 + i] & kPtAddrMask) == 0x20000000ull + static_cast<uint64_t>(i) * 4096);
++
++    // Map spanning 2 MiB L0 boundary [0x1ff000, 0x203000) (4 pages: 1 in l0[0][511], 3 in l0[1][0..2]).
++    md.segCalls = 0; owner.pteLookups = 0;
++    assert(owner.vmMap(1, 0x1ff000, &md, 0, 16384) == kIOReturnSuccess);
++    assert(md.segCalls == 1 && owner.pteLookups == 2);
++    assert((owner.vm[0].l0[0][511] & kPtAddrMask) == 0x20000000ull);
++    assert((owner.vm[0].l0[1][0] & kPtAddrMask) == 0x20001000ull);
++    assert((owner.vm[0].l0[1][2] & kPtAddrMask) == 0x20003000ull);
++
++    // Sparse vmUnmap over 4 MiB skips unallocated L0 table 2 in 1 lookup instead of per-page scanning.
++    owner.pteLookups = 0;
++    assert(owner.vmUnmap(1, 0x100000, 1ull << 22) == kIOReturnSuccess);
++    assert(owner.pteLookups == 3); // L0 tables 0, 1, 2
++    assert(!owner.vm[0].l0[0][256] && !owner.vm[0].l0[1][0]);
++
++    // 2. Sorted O(log N) GemVa + ibCovered across split adjacent maps + single HDP flush in gpuSubmit.
++    owner.gq[0].ready = true; owner.gq[0].ringDw = 1024; owner.gq[0].fenceOff = 0; owner.gq[0].wbOff = 64;
++    owner.gq[1].ready = true; owner.gq[1].ringDw = 1024; owner.gq[1].fenceOff = 16; owner.gq[1].wbOff = 128; owner.gq[1].gfx = true;
++
++    IOAccelPhxNativeClient computeClient; computeClient.owner = &owner; computeClient.bo[1].md = &md;
++    IOAccelPhxNativeClient gfxClient; gfxClient.owner = &owner; gfxClient.bo[1].md = &md; gfxClient.bo[2].md = &md;
++
++    // Insert higher VA first, lower adjacent VA second -> kept sorted and ibCovered crosses boundary cleanly.
++    phxn_gem_va g{};
++    g.handle = 1; g.operation = PHX_AMDGPU_VA_OP_MAP; g.va_address = 0x20000; g.map_size = 4096;
++    g.flags = PHX_AMDGPU_VM_PAGE_EXECUTABLE;
++    IOExternalMethodArguments ga{}; ga.structureInput = &g; ga.structureInputSize = sizeof(g);
++    assert(gfxClient.doGemVa(&ga) == kIOReturnSuccess);
++    g.va_address = 0x10000; g.map_size = 0x10000;
++    assert(gfxClient.doGemVa(&ga) == kIOReturnSuccess);
++    assert(gfxClient.mapCount == 2 && gfxClient.maps[0].va == 0x10000 && gfxClient.maps[1].va == 0x20000);
++    assert(gfxClient.ibCovered(0x1f000, 8192));
++    g.va_address = 0x18000; g.map_size = 4096;
++    assert(gfxClient.doGemVa(&ga) == kIOReturnBadArgument); // overlap rejected
++
++    // Compute submit seq 1 on gq[0]; assert single hdpFlush per submit.
++    g.handle = 1; g.va_address = 0x40000; g.map_size = 4096; g.flags = PHX_AMDGPU_VM_PAGE_EXECUTABLE;
++    assert(computeClient.doGemVa(&ga) == kIOReturnSuccess);
++    struct Packet { phxn_cs_in h; phxn_cs_ib ib; } pkt{};
++    pkt.h.abi = PHXN_ABI_VERSION; pkt.h.num_ibs = 1; pkt.h.ctx_id = 1;
++    pkt.ib.ip_type = PHX_AMDGPU_HW_IP_COMPUTE; pkt.ib.va_start = 0x40000; pkt.ib.ib_bytes = 4;
++    IOExternalMethodArguments sa{}; sa.scalarOutputCount = 1; sa.structureInput = &pkt; sa.structureInputSize = sizeof(pkt);
++    owner.hdpFlushes = 0;
++    assert(computeClient.doSubmit(&sa) == kIOReturnSuccess && sa.scalarOutput[0] == 1);
++    assert(owner.hdpFlushes == 1 && computeClient.lastSeqByQueue[0] == 1 && computeClient.lastSeqByQueue[1] == 0);
++
++    // GFX submit seq 2 on gq[1].
++    pkt.ib.ip_type = PHX_AMDGPU_HW_IP_GFX; pkt.ib.va_start = 0x1f800; pkt.ib.ib_bytes = 8;
++    assert(gfxClient.doSubmit(&sa) == kIOReturnSuccess && sa.scalarOutput[0] == 2);
++    assert(owner.hdpFlushes == 2 && gfxClient.lastSeqByQueue[1] == 2);
++
++    // Advance ONLY GFX fence to 2 (Compute fence stays 0 = stuck on seq 1).
++    // GFX-only client must retire immediately without stalling on stalled Compute queue.
++    setFence(owner, 16, 2);
++    IOExternalMethodArguments wa{};
++    wa.scalarInputCount = 3; wa.scalarOutputCount = 3;
++    wa.scalarInput[0] = PHXN_SEQ_LAST; wa.scalarInput[1] = 1000000; wa.scalarInput[2] = 0;
++    assert(gfxClient.doWaitSeq(&wa) == kIOReturnSuccess);
++    assert(wa.scalarOutput[0] == 0 && wa.scalarOutput[1] >= 2 && gfxClient.lastRetiredFencesArg == wa.scalarOutput[1]);
++
++    // Hybrid client submits seq 3 on GFX after seq 1 on Compute; GFX retires while Compute stays 0.
++    // Waiting on GFX seq 3 succeeds immediately, while retireFences receives safe cross-queue seq (0 < 1).
++    pkt.ib.ip_type = PHX_AMDGPU_HW_IP_COMPUTE; pkt.ib.va_start = 0x40000; pkt.ib.ib_bytes = 4;
++    IOAccelPhxNativeClient hybrid; hybrid.owner = &owner; hybrid.bo[1].md = &md;
++    hybrid.maps[0] = PhxVaMap{true, 1, 0x10000, 0x50000, 0, PHX_AMDGPU_VM_PAGE_EXECUTABLE};
++    hybrid.mapCount = 1;
++    assert(hybrid.doSubmit(&sa) == kIOReturnSuccess && sa.scalarOutput[0] == 3); // compute seq 3
++    pkt.ib.ip_type = PHX_AMDGPU_HW_IP_GFX;
++    assert(hybrid.doSubmit(&sa) == kIOReturnSuccess && sa.scalarOutput[0] == 4); // gfx seq 4
++    setFence(owner, 16, 4); // gfx done through 4, compute still stuck on 1
++    assert(hybrid.doWaitSeq(&wa) == kIOReturnSuccess && wa.scalarOutput[0] == 0 && wa.scalarOutput[1] >= 4);
++    assert(hybrid.lastRetiredFencesArg < 3); // did NOT falsely retire pending compute seq 3!
++
++    // 3. doBoFree skips waitIdle on unmapped kernel BO (even when GPU hasn't retired lastSeq),
++    //    but waits on host-imported BOs.
++    hybrid.bo[2].md = &md; hybrid.bo[2].host = false; hybrid.gttUsed = 65536;
++    IOExternalMethodArguments bf{}; bf.scalarInputCount = 1; bf.scalarInput[0] = 2;
++    hybrid.waitIdleCalls = 0;
++    assert(hybrid.doBoFree(&bf) == kIOReturnSuccess && hybrid.waitIdleCalls == 0);
++    hybrid.bo[3].md = &md; hybrid.bo[3].host = true; hybrid.hostUsed = 65536;
++    bf.scalarInput[0] = 3;
++    assert(hybrid.doBoFree(&bf) == kIOReturnBusy && hybrid.waitIdleCalls == 1);
++}
++'''
++        with tempfile.TemporaryDirectory() as tmp:
++            path = pathlib.Path(tmp)
++            (path / 'test_p1_bringup.cpp').write_text(code)
++            subprocess.run(['clang++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
++                            '-fsanitize=address,undefined', '-I' + str(ROOT / 'src'),
++                            str(path / 'test_p1_bringup.cpp'), '-o', str(path / 'test_p1_bringup')],
++                           check=True)
++            subprocess.run([str(path / 'test_p1_bringup')], check=True)
++
++    def test_nvmtl_vk_p1_bda_fence_rp_light_pcache_and_barriers(self):
++        vk_h = (ROOT / 'src/nmplugin/nvmtl_vk.h').read_text()
++        vk_c = (ROOT / 'src/nmplugin/nvmtl_vk.c').read_text()
++        dev_m = (ROOT / 'src/nmplugin/NVMTLDevice.m').read_text()
++        obj_m = (ROOT / 'src/nmplugin/NVMTLObjects.m').read_text()
++
++        # Source invariants check
++        self.assertIn('uint64_t bda;', vk_h)
++        self.assertIn('void *fetch_set;', vk_h)
++        self.assertIn('nvmtl_surface_keep_reclaim_hook', vk_h)
++        self.assertIn('nvmtl_surface_keep_reclaim_hook', dev_m)
++        self.assertIn('nvmtl_pixel_sampler_key_for', obj_m)
++        self.assertIn('g_pskey_lock', obj_m)
++        self.assertIn('(w[i + 3] == 2 || w[i + 3] == 3)', method(vk_c, 'static int nvmtl_spirv_bmask('))
++        snap_c_body = method(vk_c, 'static VkDescriptorSet nvmtl_snapshot_set_c(')
++        self.assertIn('if ((live || was) && nvmtl_dirty_only_on())', snap_c_body)
++        snap_md_body = vk_c.split('static VkDescriptorSet nvmtl_snapshot_set_md(', 2)[2].split('static VkDescriptorSet nvmtl_snapshot_set_c(', 1)[0]
++        self.assertIn('__builtin_ctzll(bits)', snap_md_body)
++        self.assertIn('NVMTL_COPY_HAS(m, i) ((m) && (i) < 256u', vk_c)
++        self.assertNotIn('nvmtl_opaque_CreateGraphicsPipelines(g_dev, VK_NULL_HANDLE', vk_c)
++        self.assertNotIn('nvmtl_opaque_CreateComputePipelines(g_dev, VK_NULL_HANDLE', vk_c)
++        self.assertNotIn('pvkCreateComputePipelines(g_dev, VK_NULL_HANDLE', vk_c)
++        self.assertIn('nvmtl_pipe_cache_init();', vk_c)
++        self.assertIn('nvmtl_fence_acquire(&fence)', vk_c)
++        self.assertIn('nvmtl_fence_release(fence, 1)', vk_c)
++        for fn in ('int nvmtl_vk_cmd_fill_buffer(', 'int nvmtl_vk_cmd_write_word(',
++                   'int nvmtl_vk_cmd_copy_buffer(', 'int nvmtl_vk_cmd_copy_buffer_to_image_level_layer(',
++                   'int nvmtl_vk_cmd_copy_image_to_buffer_level_layer('):
++            body = method(vk_c, fn)
++            self.assertIn('nvmtl_vk_cmd_barrier_to_transfer(', body, fn)
++            self.assertIn('nvmtl_vk_cmd_barrier_from_transfer(', body, fn)
++            self.assertNotIn('nvmtl_vk_cmd_barrier(', body, fn)
++
++        extracted = '\n'.join([
++            method(vk_c, 'static void nvmtl_pipe_cache_path('),
++            method(vk_c, 'static int nvmtl_pipe_cache_write_atomic('),
++            method(vk_c, 'static void *nvmtl_pipe_cache_read_file('),
++            method(vk_c, 'static void nvmtl_pipe_cache_save('),
++            method(vk_c, 'static void nvmtl_pipe_cache_init('),
++            method(vk_c, 'static void nvmtl_pipe_cache_note_compile('),
++            method(vk_c, 'static VkResult nvmtl_fence_acquire('),
++            method(vk_c, 'static void nvmtl_fence_release('),
++            method(vk_c, 'static int nvmtl_rp_light('),
++            method(vk_c, 'static int nvmtl_fbfetch_decide('),
++            method(vk_c, 'static VkDescriptorSet nvmtl_fetch_set('),
++            method(vk_c, 'static uint64_t nvmtl_amd_vram_cap('),
++            method(vk_c, 'static size_t nvmtl_bpark_budget('),
++            method(vk_c, 'static uint64_t bpark_drain_all('),
++            method(vk_c, 'static unsigned nvmtl_keep_cap('),
++            method(vk_c, 'static int ipark_on('),
++            method(vk_c, 'static size_t nvmtl_ipark_budget('),
++            method(vk_c, 'static void ipark_free('),
++            method(vk_c, 'static int ipark_take('),
++            method(vk_c, 'static uint64_t ipark_drain_all('),
++            method(vk_c, 'static int nvmtl_spirv_bmask('),
++            method(vk_c, 'static void nvmtl_vk_cmd_barrier_to_transfer('),
++            method(vk_c, 'static void nvmtl_vk_cmd_barrier_from_transfer('),
++            method(vk_c, 'uint64_t nvmtl_vk_buffer_address('),
++            method(vk_c, 'int nvmtl_vk_image_host_xfer_ok('),
++            method(vk_c, 'int nvmtl_vk_pre_copy_buf_to_img('),
++        ])
++
++        c_harness = r'''
++#define _GNU_SOURCE
++#include <assert.h>
++#include <limits.h>
++#ifndef PATH_MAX
++#define PATH_MAX 4096
++#endif
++#include <pthread.h>
++#include <stdatomic.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <sys/wait.h>
++#include <unistd.h>
++
++typedef int VkResult;
++typedef uint32_t VkFlags;
++typedef uint32_t VkBool32;
++typedef struct VkDevice_T *VkDevice;
++typedef struct VkBuffer_T *VkBuffer;
++typedef struct VkImage_T *VkImage;
++typedef struct VkFence_T *VkFence;
++typedef struct VkPipelineCache_T *VkPipelineCache;
++typedef struct VkCommandBuffer_T *VkCommandBuffer;
++typedef void VkAllocationCallbacks;
++
++#define VK_SUCCESS 0
++#define VK_ERROR_INITIALIZATION_FAILED (-3)
++#define VK_ERROR_OUT_OF_POOL_MEMORY (-1000069000)
++#define VK_NULL_HANDLE NULL
++#define VK_STRUCTURE_TYPE_FENCE_CREATE_INFO 8
++#define VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO 17
++#define VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO 33
++#define VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO 34
++#define VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET 35
++#define VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO 1000244001
++#define VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER 45
++#define VK_STRUCTURE_TYPE_MEMORY_BARRIER 46
++#define VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT 10
++#define VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT 1u
++#define VK_IMAGE_ASPECT_COLOR_BIT 1u
++#define VK_IMAGE_LAYOUT_UNDEFINED 0
++#define VK_IMAGE_LAYOUT_GENERAL 1
++#define VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL 5
++#define VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL 7
++#define VK_QUEUE_FAMILY_IGNORED (~0U)
++#define VK_ACCESS_MEMORY_READ_BIT 0x80u
++#define VK_ACCESS_MEMORY_WRITE_BIT 0x100u
++#define VK_ACCESS_TRANSFER_READ_BIT 0x800u
++#define VK_ACCESS_TRANSFER_WRITE_BIT 0x1000u
++#define VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT 0x1u
++#define VK_PIPELINE_STAGE_TRANSFER_BIT 0x1000u
++#define VK_PIPELINE_STAGE_ALL_COMMANDS_BIT 0x10000u
++#define NVMTL_NCOL 8u
++#define NVMTL_FETCH_BINDING 192u
++
++typedef VkFlags VkPipelineStageFlags;
++typedef VkFlags VkAccessFlags;
++typedef VkFlags VkImageAspectFlags;
++typedef int VkImageLayout;
++typedef int VkDescriptorType;
++typedef struct VkDescriptorSet_T *VkDescriptorSet;
++typedef struct VkDescriptorPool_T *VkDescriptorPool;
++typedef struct VkDescriptorSetLayout_T *VkDescriptorSetLayout;
++typedef struct VkSampler_T *VkSampler;
++
++typedef struct { int sType; const void *pNext; VkFlags flags; } VkFenceCreateInfo;
++typedef struct { int sType; const void *pNext; VkFlags flags; size_t initialDataSize; const void *pInitialData; } VkPipelineCacheCreateInfo;
++typedef struct { int sType; const void *pNext; VkBuffer buffer; } VkBufferDeviceAddressInfo;
++typedef struct { int sType; const void *pNext; VkAccessFlags srcAccessMask; VkAccessFlags dstAccessMask; } VkMemoryBarrier;
++typedef struct { VkImageAspectFlags aspectMask; uint32_t baseMipLevel, levelCount, baseArrayLayer, layerCount; } VkImageSubresourceRange;
++typedef struct { VkImageAspectFlags aspectMask; uint32_t mipLevel, baseArrayLayer, layerCount; } VkImageSubresourceLayers;
++typedef struct { int32_t x, y, z; } VkOffset3D;
++typedef struct { uint32_t width, height, depth; } VkExtent3D;
++typedef struct { uint64_t bufferOffset; uint32_t bufferRowLength, bufferImageHeight; VkImageSubresourceLayers imageSubresource; VkOffset3D imageOffset; VkExtent3D imageExtent; } VkBufferImageCopy;
++typedef struct { int sType; const void *pNext; VkAccessFlags srcAccessMask, dstAccessMask; VkImageLayout oldLayout, newLayout; uint32_t srcQueueFamilyIndex, dstQueueFamilyIndex; VkImage image; VkImageSubresourceRange subresourceRange; } VkImageMemoryBarrier;
++typedef struct VkImageView_T *VkImageView;
++typedef struct { VkDescriptorType type; uint32_t descriptorCount; } VkDescriptorPoolSize;
++typedef struct { int sType; const void *pNext; VkFlags flags; uint32_t maxSets; uint32_t poolSizeCount; const VkDescriptorPoolSize *pPoolSizes; } VkDescriptorPoolCreateInfo;
++typedef struct { int sType; const void *pNext; VkDescriptorPool descriptorPool; uint32_t descriptorSetCount; const VkDescriptorSetLayout *pSetLayouts; } VkDescriptorSetAllocateInfo;
++typedef struct { VkSampler sampler; VkImageView imageView; VkImageLayout imageLayout; } VkDescriptorImageInfo;
++typedef struct { int sType; const void *pNext; VkDescriptorSet dstSet; uint32_t dstBinding, dstArrayElement, descriptorCount; VkDescriptorType descriptorType; const VkDescriptorImageInfo *pImageInfo; const void *pBufferInfo, *pTexelBufferView; } VkWriteDescriptorSet;
++typedef struct { void *pool, *set; } nvk_setref;
++typedef struct { void *cb; void *fetch_set; void *fetchview[NVMTL_NCOL]; nvk_setref *sets; unsigned nsets, capsets; } nvk_cmdbuf;
++typedef struct { void *buf; size_t size; uint64_t bda; size_t alloc; void *map; int bar1; } nvk_buffer;
++typedef struct VkDeviceMemory_T *VkDeviceMemory;
++typedef struct { void *img; uint32_t w, h, layout, fmt, bpp, bw, bh; void *mem, *view; size_t alloc; uint32_t mips, layers, mtl_type, vkflags, usage, storage, vpair, sysmem; int placed; uint64_t up_token; uint8_t a8; } nvk_image;
++static pthread_mutex_t g_desc_lock = PTHREAD_MUTEX_INITIALIZER;
++static VkDescriptorPool g_fetchPools[64];
++static unsigned g_nfetchPools = 0;
++static VkDescriptorSetLayout g_fetchLayout = (VkDescriptorSetLayout)0x77;
++static nvk_image g_dummyImg = { .view = (void *)0xd001 };
++static unsigned g_fetch_allocs = 0, g_fetch_updates = 0;
++static uint32_t g_fetch_last_nw = 0;
++static uint64_t g_next_fetch_set = 0xf00;
++static VkResult mock_vkCreateDescriptorPool(VkDevice d, const VkDescriptorPoolCreateInfo *ci, const VkAllocationCallbacks *a, VkDescriptorPool *out) {
++    (void)d; (void)ci; (void)a;
++    *out = (VkDescriptorPool)0xfa01;
++    return VK_SUCCESS;
++}
++static VkResult mock_vkAllocateDescriptorSets(VkDevice d, const VkDescriptorSetAllocateInfo *ai, VkDescriptorSet *out) {
++    (void)d; (void)ai;
++    g_fetch_allocs++;
++    *out = (VkDescriptorSet)(uintptr_t)(++g_next_fetch_set);
++    return VK_SUCCESS;
++}
++static VkResult mock_vkFreeDescriptorSets(VkDevice d, VkDescriptorPool p, uint32_t c, const VkDescriptorSet *s) {
++    (void)d; (void)p; (void)c; (void)s;
++    return VK_SUCCESS;
++}
++static void mock_vkUpdateDescriptorSets(VkDevice d, uint32_t nw, const VkWriteDescriptorSet *w, uint32_t nc, const void *c) {
++    (void)d; (void)w; (void)nc; (void)c;
++    g_fetch_updates++;
++    g_fetch_last_nw = nw;
++}
++static VkResult (*pvkCreateDescriptorPool)(VkDevice, const VkDescriptorPoolCreateInfo *, const VkAllocationCallbacks *, VkDescriptorPool *) = mock_vkCreateDescriptorPool;
++static VkResult (*pvkAllocateDescriptorSets)(VkDevice, const VkDescriptorSetAllocateInfo *, VkDescriptorSet *) = mock_vkAllocateDescriptorSets;
++static VkResult (*pvkFreeDescriptorSets)(VkDevice, VkDescriptorPool, uint32_t, const VkDescriptorSet *) = mock_vkFreeDescriptorSets;
++static void (*pvkUpdateDescriptorSets)(VkDevice, uint32_t, const VkWriteDescriptorSet *, uint32_t, const void *) = mock_vkUpdateDescriptorSets;
++typedef struct { nvk_cmdbuf cb; unsigned begun, n, fills, copies, nhold; unsigned long long bytes; void *hold[8]; } nvmtl_prologue;
++static nvmtl_prologue *g_pre_cur = NULL;
++static VkImageAspectFlags nvmtl_barrier_aspect(const nvk_image *i) { (void)i; return VK_IMAGE_ASPECT_COLOR_BIT; }
++static VkImageAspectFlags nvmtl_copy_aspect(const nvk_image *i) { (void)i; return VK_IMAGE_ASPECT_COLOR_BIT; }
++static uint64_t nvmtl_vk_pressure_reclaim(int include_host, int include_surf) { (void)include_host; (void)include_surf; return 0; }
++static size_t g_alloc_bytes = 0;
++static uint64_t g_sys_bytes = 0, g_sys_align = 0, g_vram_bytes = 0, g_img_align = 0, g_img_made = 0;
++static unsigned g_ipark_freed_calls = 0;
++static void mock_vkDestroyImageView(VkDevice d, VkImageView v, const VkAllocationCallbacks *a) { (void)d; (void)v; (void)a; }
++static void mock_vkDestroyImage(VkDevice d, VkImage i, const VkAllocationCallbacks *a) { (void)d; (void)i; (void)a; g_ipark_freed_calls++; }
++static void mock_vkFreeMemory(VkDevice d, VkDeviceMemory m, const VkAllocationCallbacks *a) { (void)d; (void)m; (void)a; }
++static void (*pvkDestroyImageView)(VkDevice, VkImageView, const VkAllocationCallbacks *) = mock_vkDestroyImageView;
++static void (*pvkDestroyImage)(VkDevice, VkImage, const VkAllocationCallbacks *) = mock_vkDestroyImage;
++static void (*pvkFreeMemory)(VkDevice, VkDeviceMemory, const VkAllocationCallbacks *) = mock_vkFreeMemory;
++#define NVMTL_IMGPARK_N 64u
++static pthread_mutex_t g_ipark_lock = PTHREAD_MUTEX_INITIALIZER;
++static nvk_image g_ipark[NVMTL_IMGPARK_N];
++static unsigned g_ipark_n = 0;
++static size_t g_ipark_bytes = 0;
++static _Atomic uint64_t g_ipark_parked = 0, g_ipark_reused = 0, g_ipark_evicted = 0, g_ipark_drained = 0;
++#define NVMTL_KEEP 256
++#define NVMTL_BUFPARK_N 32
++#define NVMTL_BUFPARK_BYTES (256ull << 20)
++static pthread_mutex_t g_bpark_lock = PTHREAD_MUTEX_INITIALIZER;
++static nvk_buffer g_bpark[NVMTL_BUFPARK_N];
++static unsigned g_bpark_n = 0;
++static uint64_t g_bpark_bytes = 0;
++static _Atomic uint64_t g_bpark_drained = 0;
++static unsigned g_bpark_freed_calls = 0;
++static void bpark_free(nvk_buffer *b) { g_bpark_freed_calls++; memset(b, 0, sizeof *b); }
++
++typedef VkResult (*PFN_vkCreatePipelineCache)(VkDevice, const VkPipelineCacheCreateInfo *, const VkAllocationCallbacks *, VkPipelineCache *);
++typedef void (*PFN_vkDestroyPipelineCache)(VkDevice, VkPipelineCache, const VkAllocationCallbacks *);
++typedef VkResult (*PFN_vkGetPipelineCacheData)(VkDevice, VkPipelineCache, size_t *, void *);
++typedef VkResult (*PFN_vkMergePipelineCaches)(VkDevice, VkPipelineCache, uint32_t, const VkPipelineCache *);
++
++static VkDevice g_dev = (VkDevice)0x1;
++static _Atomic int g_state = 1;
++static const char *g_prog = "WindowServer";
++static uint16_t g_vendor_val = 0x1002;
++#define getprogname nvmtl_test_getprogname
++static const char *nvmtl_test_getprogname(void) { return g_prog; }
++static uint16_t nvmtl_vk_vendor(void) { return g_vendor_val; }
++static void nvlog(const char *fmt, ...) { (void)fmt; }
++
++static unsigned g_fence_creates = 0, g_fence_resets = 0, g_fence_destroys = 0;
++static int g_fail_reset = 0;
++static uint64_t g_next_fence_id = 0x100;
++static VkResult mock_vkCreateFence(VkDevice dev, const VkFenceCreateInfo *ci, const VkAllocationCallbacks *alloc, VkFence *out) {
++    (void)dev; (void)ci; (void)alloc;
++    g_fence_creates++;
++    *out = (VkFence)(uintptr_t)(++g_next_fence_id);
++    return VK_SUCCESS;
++}
++static VkResult mock_vkResetFences(VkDevice dev, uint32_t count, const VkFence *fences) {
++    (void)dev; (void)fences;
++    assert(count == 1);
++    if (g_fail_reset) return VK_ERROR_INITIALIZATION_FAILED;
++    g_fence_resets++;
++    return VK_SUCCESS;
++}
++static void mock_vkDestroyFence(VkDevice dev, VkFence fence, const VkAllocationCallbacks *alloc) {
++    (void)dev; (void)fence; (void)alloc;
++    g_fence_destroys++;
++}
++static VkResult (*pvkCreateFence)(VkDevice, const VkFenceCreateInfo *, const VkAllocationCallbacks *, VkFence *) = mock_vkCreateFence;
++static VkResult (*pvkResetFences)(VkDevice, uint32_t, const VkFence *) = mock_vkResetFences;
++static void (*pvkDestroyFence)(VkDevice, VkFence, const VkAllocationCallbacks *) = mock_vkDestroyFence;
++
++static unsigned g_bda_calls = 0;
++static uint64_t mock_vkGetBufferDeviceAddress(VkDevice dev, const VkBufferDeviceAddressInfo *info) {
++    (void)dev;
++    g_bda_calls++;
++    return 0xbeef0000ull + (uint64_t)(uintptr_t)info->buffer;
++}
++static uint64_t (*pvkGetBufferDeviceAddress)(VkDevice, const VkBufferDeviceAddressInfo *) = mock_vkGetBufferDeviceAddress;
++
++static VkPipelineStageFlags g_last_src_stage = 0, g_last_dst_stage = 0;
++static VkMemoryBarrier g_last_mb = {0};
++static unsigned g_mb_calls = 0, g_imb_calls = 0, g_b2i_calls = 0;
++static VkImageMemoryBarrier g_last_imbs[4];
++static VkBufferImageCopy g_last_b2i = {0};
++static void mock_vkCmdPipelineBarrier(VkCommandBuffer cb, VkPipelineStageFlags s, VkPipelineStageFlags d, VkFlags dep,
++                                      uint32_t nmb, const VkMemoryBarrier *mb, uint32_t nbm, const void *bm, uint32_t nim, const void *im) {
++    (void)cb; (void)dep; (void)nbm; (void)bm;
++    g_last_src_stage = s; g_last_dst_stage = d;
++    if (nmb && mb) { g_mb_calls += nmb; g_last_mb = *mb; }
++    if (nim && im) {
++        const VkImageMemoryBarrier *arr = (const VkImageMemoryBarrier *)im;
++        for (uint32_t i = 0; i < nim && g_imb_calls < 4; i++) g_last_imbs[g_imb_calls++] = arr[i];
++    }
++}
++static void (*pvkCmdPipelineBarrier)(VkCommandBuffer, VkPipelineStageFlags, VkPipelineStageFlags, VkFlags,
++                                     uint32_t, const VkMemoryBarrier *, uint32_t, const void *, uint32_t, const void *) = mock_vkCmdPipelineBarrier;
++static void mock_vkCmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer src, VkImage dst, VkImageLayout layout, uint32_t n, const VkBufferImageCopy *r) {
++    (void)cb; (void)src; (void)dst; (void)layout;
++    if (n && r) { g_b2i_calls += n; g_last_b2i = r[0]; }
++}
++static void (*pvkCmdCopyBufferToImage)(VkCommandBuffer, VkBuffer, VkImage, VkImageLayout, uint32_t, const VkBufferImageCopy *) = mock_vkCmdCopyBufferToImage;
++
++static size_t g_loaded_pcache_bytes = 0;
++static uint8_t g_loaded_pcache_sample[64] = {0};
++static uint8_t g_pcache_blob[8] = {'P', 'H', 'X', 'C', 1, 2, 3, 4};
++static VkResult mock_vkCreatePipelineCache(VkDevice dev, const VkPipelineCacheCreateInfo *ci, const VkAllocationCallbacks *alloc, VkPipelineCache *out) {
++    (void)dev; (void)alloc;
++    g_loaded_pcache_bytes = ci->initialDataSize;
++    if (ci->pInitialData && ci->initialDataSize) {
++        size_t cp = ci->initialDataSize < sizeof(g_loaded_pcache_sample) ? ci->initialDataSize : sizeof(g_loaded_pcache_sample);
++        memcpy(g_loaded_pcache_sample, ci->pInitialData, cp);
++    }
++    *out = (VkPipelineCache)0x5555;
++    return VK_SUCCESS;
++}
++static void mock_vkDestroyPipelineCache(VkDevice dev, VkPipelineCache pc, const VkAllocationCallbacks *alloc) {
++    (void)dev; (void)pc; (void)alloc;
++}
++static VkResult mock_vkGetPipelineCacheData(VkDevice dev, VkPipelineCache pc, size_t *sz, void *data) {
++    (void)dev; (void)pc;
++    *sz = sizeof(g_pcache_blob);
++    if (data) memcpy(data, g_pcache_blob, sizeof(g_pcache_blob));
++    return VK_SUCCESS;
++}
++static VkResult mock_vkMergePipelineCaches(VkDevice dev, VkPipelineCache dst, uint32_t count, const VkPipelineCache *srcs) {
++    (void)dev; (void)dst; (void)count; (void)srcs;
++    return VK_SUCCESS;
++}
++static PFN_vkCreatePipelineCache pvkCreatePipelineCache = mock_vkCreatePipelineCache;
++static PFN_vkDestroyPipelineCache pvkDestroyPipelineCache = mock_vkDestroyPipelineCache;
++static PFN_vkGetPipelineCacheData pvkGetPipelineCacheData = mock_vkGetPipelineCacheData;
++static PFN_vkMergePipelineCaches pvkMergePipelineCaches = mock_vkMergePipelineCaches;
++
++static VkPipelineCache g_pipe_cache;
++static _Atomic uint64_t g_pipe_compiled;
++static pthread_mutex_t g_pipe_cache_lock = PTHREAD_MUTEX_INITIALIZER;
++static char g_pipe_cache_path[PATH_MAX];
++static char g_pipe_cache_shared_path[PATH_MAX];
++#define NVMTL_FENCE_POOL_CAP 32
++static VkFence g_fence_pool[NVMTL_FENCE_POOL_CAP];
++static unsigned g_fence_pool_n;
++static pthread_mutex_t g_fence_pool_lock = PTHREAD_MUTEX_INITIALIZER;
++
++#define NVMTL_NBUF 32
++#define NVMTL_NTEX 128
++#define NVMTL_NSAMP 32
++#define NVMTL_ADDRESS_BINDING (NVMTL_NBUF + NVMTL_NTEX + NVMTL_NSAMP)
++#define NVMTL_ADDRESS_BINDING_NUMBER 640
++#define NVMTL_NSTEX 128
++#define NVMTL_STEX_BINDING_NUMBER 480
++
++''' + extracted + r'''
++
++static uint64_t check_vram_cap_forked(const char *prog, const char *env_val) {
++    int pfd[2];
++    assert(pipe(pfd) == 0);
++    pid_t pid = fork();
++    assert(pid >= 0);
++    if (pid == 0) {
++        close(pfd[0]);
++        g_prog = prog;
++        if (env_val) setenv("NVMTL_AMD_VRAM_CAP_MB", env_val, 1);
++        else unsetenv("NVMTL_AMD_VRAM_CAP_MB");
++        uint64_t cap = nvmtl_amd_vram_cap();
++        assert(write(pfd[1], &cap, sizeof(cap)) == sizeof(cap));
++        close(pfd[1]);
++        _exit(0);
++    }
++    close(pfd[1]);
++    uint64_t cap = 0;
++    assert(read(pfd[0], &cap, sizeof(cap)) == sizeof(cap));
++    close(pfd[0]);
++    int st = 0;
++    assert(waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0);
++    return cap;
++}
++
++static int check_rp_light_forked(const char *prog, uint16_t vendor, const char *env_val) {
++    pid_t pid = fork();
++    assert(pid >= 0);
++    if (pid == 0) {
++        g_prog = prog;
++        g_vendor_val = vendor;
++        if (env_val) setenv("NVMTL_RP_LIGHT", env_val, 1);
++        else unsetenv("NVMTL_RP_LIGHT");
++        int res = nvmtl_rp_light();
++        _exit(res ? 10 : 20);
++    }
++    int st = 0;
++    assert(waitpid(pid, &st, 0) == pid && WIFEXITED(st));
++    return WEXITSTATUS(st) == 10 ? 1 : 0;
++}
++
++int main(void) {
++    // 1. BDA cache hit avoids repeated driver queries.
++    nvk_buffer buf = {0};
++    buf.buf = (void *)0x1234;
++    uint64_t a1 = nvmtl_vk_buffer_address(&buf);
++    uint64_t a2 = nvmtl_vk_buffer_address(&buf);
++    assert(a1 == 0xbeef0000ull + 0x1234 && a2 == a1 && g_bda_calls == 1);
++    assert(nvmtl_vk_buffer_address(NULL) == 0);
++
++    // 2. VkFence pool acquire/release, reset fail, unhealthy destroy, and cap limit.
++    VkFence f1 = NULL, f2 = NULL;
++    assert(nvmtl_fence_acquire(&f1) == VK_SUCCESS && g_fence_creates == 1);
++    nvmtl_fence_release(f1, 1);
++    assert(g_fence_resets == 1 && g_fence_destroys == 0);
++    assert(nvmtl_fence_acquire(&f2) == VK_SUCCESS && f2 == f1 && g_fence_creates == 1);
++    nvmtl_fence_release(f2, 0); // unhealthy -> destroyed, not pooled
++    assert(g_fence_destroys == 1 && g_fence_pool_n == 0);
++    g_fail_reset = 1;
++    assert(nvmtl_fence_acquire(&f1) == VK_SUCCESS && g_fence_creates == 2);
++    nvmtl_fence_release(f1, 1); // reset fails -> destroyed
++    assert(g_fence_destroys == 2 && g_fence_pool_n == 0);
++    g_fail_reset = 0;
++    VkFence bulk[NVMTL_FENCE_POOL_CAP + 4];
++    for (unsigned i = 0; i < NVMTL_FENCE_POOL_CAP + 4; i++)
++        assert(nvmtl_fence_acquire(&bulk[i]) == VK_SUCCESS);
++    for (unsigned i = 0; i < NVMTL_FENCE_POOL_CAP + 4; i++)
++        nvmtl_fence_release(bulk[i], 1);
++    assert(g_fence_pool_n == NVMTL_FENCE_POOL_CAP && g_fence_destroys == 6);
++
++    // 3. Narrowed transfer barriers.
++    nvk_cmdbuf cb = { .cb = (void *)0x1 };
++    nvmtl_vk_cmd_barrier_to_transfer(&cb);
++    assert(g_last_src_stage == VK_PIPELINE_STAGE_ALL_COMMANDS_BIT && g_last_dst_stage == VK_PIPELINE_STAGE_TRANSFER_BIT);
++    assert(g_last_mb.dstAccessMask == (VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT));
++    nvmtl_vk_cmd_barrier_from_transfer(&cb);
++    assert(g_last_src_stage == VK_PIPELINE_STAGE_TRANSFER_BIT && g_last_dst_stage == VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
++    assert(g_last_mb.srcAccessMask == VK_ACCESS_TRANSFER_WRITE_BIT);
++
++    // 4. Persistent pipeline cache path sanitization + save + reload.
++    char pbuf[256];
++    nvmtl_pipe_cache_path(pbuf, sizeof(pbuf), 0x1002, "foo/bar baz", "/tmp/sub/", 501);
++    assert(strcmp(pbuf, "/tmp/sub/nvmtl-pcache-501-1002-foo_bar_baz.bin") == 0);
++    char tmproot[] = "/tmp/nvmtl_pcache_XXXXXX";
++    assert(mkdtemp(tmproot) != NULL);
++    setenv("TMPDIR", tmproot, 1);
++    unsetenv("NVMTL_PIPE_CACHE");
++    g_prog = "TestApp";
++    nvmtl_pipe_cache_init();
++    assert(g_pipe_cache != VK_NULL_HANDLE && g_loaded_pcache_bytes == 0);
++    for (int i = 0; i < 2; i++) nvmtl_pipe_cache_note_compile(); // 2nd compile triggers save + shared seed
++    char testapp_path[PATH_MAX];
++    snprintf(testapp_path, sizeof(testapp_path), "%s", g_pipe_cache_path);
++    g_pipe_cache = VK_NULL_HANDLE;
++    nvmtl_pipe_cache_init(); // reloads saved blob
++    assert(g_loaded_pcache_bytes == sizeof(g_pcache_blob));
++    assert(memcmp(g_loaded_pcache_sample, g_pcache_blob, sizeof(g_pcache_blob)) == 0);
++    g_pipe_cache = VK_NULL_HANDLE;
++    g_loaded_pcache_bytes = 0;
++    g_prog = "SettingsPaneApp";
++    nvmtl_pipe_cache_init(); // new app loads shared seed
++    assert(g_loaded_pcache_bytes == sizeof(g_pcache_blob));
++    assert(memcmp(g_loaded_pcache_sample, g_pcache_blob, sizeof(g_pcache_blob)) == 0);
++    nvmtl_pipe_cache_note_compile(); // note 2nd compile total or save merged shared cache
++    g_pipe_cache = VK_NULL_HANDLE;
++    unlink(testapp_path);
++    unlink(g_pipe_cache_path);
++    unlink(g_pipe_cache_shared_path);
++    rmdir(tmproot);
++
++    // 5. NVMTL_RP_LIGHT defaults ON for all processes on AMD 0x1002, honors NVMTL_RP_LIGHT=0/1.
++    assert(check_rp_light_forked("WindowServer", 0x1002, NULL) == 1);
++    assert(check_rp_light_forked("WindowServer", 0x1002, "0") == 0);
++    assert(check_rp_light_forked("WindowServer", 0x10de, NULL) == 0);
++    assert(check_rp_light_forked("GameApp", 0x1002, NULL) == 1);
++    assert(check_rp_light_forked("GameApp", 0x1002, "0") == 0);
++    assert(check_rp_light_forked("GameApp", 0x10de, "1") == 1);
++
++    // 6. nvmtl_vk_image_host_xfer_ok bounds checks & nvmtl_vk_pre_copy_buf_to_img prologue batching.
++    nvk_image himg = { .img = (void *)0xdead, .w = 1920, .h = 1080, .layout = 99, .fmt = 0, .bpp = 1, .bw = 1, .bh = 1 };
++    nvk_buffer hbuf = { .buf = (void *)0xbeef, .size = 1920ull * 1080ull };
++    assert(nvmtl_vk_image_host_xfer_ok(&himg, &hbuf, 0, 1920) == 1);
++    assert(nvmtl_vk_image_host_xfer_ok(&himg, &hbuf, 2, 1920) == 0); // offset not 4-byte aligned
++    assert(nvmtl_vk_image_host_xfer_ok(&himg, &hbuf, 0, 1919) == 0); // row_bytes < w * bpp
++    assert(nvmtl_vk_image_host_xfer_ok(&himg, &hbuf, 4, 1920) == 0); // exceeds buffer size
++    himg.bw = 4;
++    assert(nvmtl_vk_image_host_xfer_ok(&himg, &hbuf, 0, 1920) == 0); // block-compressed rejected
++    himg.bw = 1;
++    himg.h = 0;
++    assert(nvmtl_vk_image_host_xfer_ok(&himg, &hbuf, 0, 1920) == 0); // zero height rejected
++    himg.h = 1080;
++
++    nvmtl_prologue pro = {0};
++    pro.cb.cb = (void *)0x999;
++    pro.begun = 1;
++    pro.fills = 1; // force preceding transfer-to-transfer barrier check
++    g_pre_cur = &pro;
++    g_mb_calls = 0; g_imb_calls = 0; g_b2i_calls = 0;
++    assert(nvmtl_vk_pre_copy_buf_to_img(&himg, &hbuf, 0, 1920) == 0);
++    assert(pro.n == 1 && pro.copies == 1 && pro.bytes == 1920ull * 1080ull);
++    assert(g_mb_calls == 1); // TRANSFER -> TRANSFER after prior fills
++    assert(g_imb_calls == 2);
++    assert(g_last_imbs[0].oldLayout == VK_IMAGE_LAYOUT_UNDEFINED);
++    assert(g_last_imbs[0].newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++    assert(g_last_imbs[1].oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++    assert(g_last_imbs[1].newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++    assert(g_b2i_calls == 1 && g_last_b2i.bufferRowLength == 1920 && g_last_b2i.imageExtent.width == 1920 && g_last_b2i.imageExtent.height == 1080);
++    assert(himg.layout == 99); // CRITICAL: pre_copy must NOT overwrite live img->layout
++    g_pre_cur = NULL;
++    assert(nvmtl_vk_pre_copy_buf_to_img(&himg, &hbuf, 0, 1920) == -1);
++
++    // 7. Per-process AMD VRAM cap defaults (448 MiB inside RADV's 512 MiB heap) + env override.
++    assert(check_vram_cap_forked("WindowServer", NULL) == (448ull << 20));
++    assert(check_vram_cap_forked("Google Chrome", NULL) == (448ull << 20));
++    assert(check_vram_cap_forked("WindowServer", "512") == (512ull << 20));
++
++    // 9. Buffer park budget (64 MiB on AMD 0x1002, 256 MiB elsewhere) and bpark_drain_all.
++    g_vendor_val = 0x1002;
++    assert(nvmtl_bpark_budget() == (64ull << 20));
++    g_vendor_val = 0x10de;
++    assert(nvmtl_bpark_budget() == (256ull << 20));
++    g_vendor_val = 0x1002;
++    g_bpark_n = 2;
++    g_bpark[0] = (nvk_buffer){ (void *)0x11, 16 << 20, 0, 16 << 20, NULL, 0 };       // private
++    g_bpark[1] = (nvk_buffer){ (void *)0x22, 8 << 20, 0, 8 << 20, (void *)0x33, 0 }; // host-visible
++    g_bpark_bytes = 24ull << 20;
++    g_bpark_freed_calls = 0;
++    atomic_store(&g_bpark_drained, 0);
++    assert(bpark_drain_all() == (24ull << 20));
++    assert(g_bpark_n == 0 && g_bpark_bytes == 0 && g_bpark_freed_calls == 2 && atomic_load(&g_bpark_drained) == 2);
++
++    // 10. Keep cap (32 on AMD, 256 elsewhere) & image park (64 MiB budget, ipark_take exact match, ipark_drain_all).
++    g_vendor_val = 0x1002;
++    assert(nvmtl_keep_cap() == 32u);
++    assert(nvmtl_ipark_budget() == (64ull << 20));
++    g_vendor_val = 0x10de;
++    assert(nvmtl_keep_cap() == 256u);
++    g_vendor_val = 0x1002;
++    unsetenv("NVMTL_NO_IMGREUSE");
++    g_ipark_n = 2;
++    g_ipark[0] = (nvk_image){ .img = (void *)0x101, .w = 128, .h = 128, .layout = 5, .fmt = 44, .bpp = 4, .bw = 1, .bh = 1, .mem = (void *)0x201, .view = (void *)0x301, .alloc = 65536, .mips = 1, .layers = 1, .mtl_type = 2, .vkflags = 8, .usage = 0x1f, .storage = 0, .vpair = 50, .a8 = 0 };
++    g_ipark[1] = (nvk_image){ .img = (void *)0x102, .w = 64, .h = 64, .layout = 5, .fmt = 9, .bpp = 1, .bw = 1, .bh = 1, .mem = (void *)0x202, .view = (void *)0x302, .alloc = 65536, .mips = 1, .layers = 1, .mtl_type = 2, .vkflags = 0, .usage = 0x17, .storage = 0, .vpair = 0, .a8 = 1 };
++    g_ipark_bytes = 131072;
++    g_vram_bytes = 131072;
++    g_img_align = 131072;
++    g_alloc_bytes = 131072;
++    g_img_made = 0;
++    nvk_image got = {0};
++    assert(ipark_take(128, 128, 44, 1, 1, 2, 8, 0x1f, 0, 50, 1, &got) == -1); // a8 mismatch rejected
++    assert(ipark_take(128, 128, 44, 1, 1, 2, 8, 0x1f, 0, 50, 0, &got) == 0);
++    assert(got.img == (void *)0x101 && got.layout == VK_IMAGE_LAYOUT_UNDEFINED && g_img_made == 1 && g_ipark_n == 1 && g_ipark_bytes == 65536);
++    g_ipark_freed_calls = 0;
++    atomic_store(&g_ipark_drained, 0);
++    assert(ipark_drain_all() == 65536);
++    assert(g_ipark_n == 0 && g_ipark_bytes == 0 && g_ipark_freed_calls == 1 && g_vram_bytes == 65536 && g_img_align == 65536 && g_alloc_bytes == 65536 && atomic_load(&g_ipark_drained) == 1);
++
++    // 8. nvmtl_spirv_bmask excludes DescriptorSet 2 (bindless heap) and DescriptorSet 3 (NVMTL_FETCH_SET).
++    const uint32_t spv[] = {
++        0x07230203u, 0x00010000u, 0u, 16u, 0u,
++        (4u << 16) | 71u, 1u, 34u, 2u,   // id 1: DescriptorSet 2 (bindless heap)
++        (4u << 16) | 71u, 1u, 33u, 0u,   // id 1: Binding 0
++        (4u << 16) | 71u, 2u, 34u, 3u,   // id 2: DescriptorSet 3 ([[color(n)]])
++        (4u << 16) | 71u, 2u, 33u, 192u, // id 2: Binding 192
++        (4u << 16) | 71u, 3u, 34u, 1u,   // id 3: DescriptorSet 1
++        (4u << 16) | 71u, 3u, 33u, 32u,  // id 3: Binding 32 (sampled tex 0)
++        (4u << 16) | 71u, 4u, 34u, 1u,   // id 4: DescriptorSet 1
++        (4u << 16) | 71u, 4u, 33u, 640u, // id 4: Binding 640 (address table)
++    };
++    uint64_t bmask[4];
++    assert(nvmtl_spirv_bmask(spv, sizeof(spv), bmask) == 1);
++    assert((bmask[0] & 1ull) == 0);                 // set 2 binding 0 excluded
++    assert(((bmask[0] >> 32) & 1ull) == 1ull);       // set 1 binding 32 included
++    assert(((bmask[3] >> 0) & 1ull) == 1ull);        // binding 640 -> index 192 included
++    assert((bmask[3] & ~1ull) == 0);
++
++    // 11. Framebuffer fetch policy (WindowServer ON by default on AMD, overrideable) & per-pass fetch_set caching.
++    assert(nvmtl_fbfetch_decide(0x1002, "WindowServer", NULL, NULL, NULL) == 1);
++    assert(nvmtl_fbfetch_decide(0x1002, "WindowServer", NULL, "0", NULL) == 0);
++    assert(nvmtl_fbfetch_decide(0x1002, "WindowServer", "1", NULL, NULL) == 0);
++    assert(nvmtl_fbfetch_decide(0x10de, "WindowServer", NULL, NULL, NULL) == 0);
++    assert(nvmtl_fbfetch_decide(0x10de, "WindowServer", NULL, "1", NULL) == 1);
++    assert(nvmtl_fbfetch_decide(0x1002, "SecurityAgent", NULL, NULL, NULL) == 1);
++    assert(nvmtl_fbfetch_decide(0x1002, "Google Chrome", NULL, NULL, NULL) == 0);
++    assert(nvmtl_fbfetch_decide(0x1002, "Google Chrome", NULL, NULL, "1") == 1);
++
++    nvk_cmdbuf fcb = {0};
++    fcb.fetchview[0] = (void *)0xaa01;
++    g_fetch_allocs = 0; g_fetch_updates = 0; g_fetch_last_nw = 0;
++    VkDescriptorSet fs1 = nvmtl_fetch_set(&fcb, 0x1u);
++    VkDescriptorSet fs2 = nvmtl_fetch_set(&fcb, 0x7u); // same pass, wider mask -> reuses cached fetch_set
++    assert(fs1 != VK_NULL_HANDLE && fs2 == fs1);
++    assert(g_fetch_allocs == 1 && g_fetch_updates == 1 && g_fetch_last_nw == NVMTL_NCOL);
++    assert(fcb.nsets == 1);
++    fcb.fetch_set = NULL; // new render pass clears cached fetch_set
++    VkDescriptorSet fs3 = nvmtl_fetch_set(&fcb, 0x1u);
++    assert(fs3 != VK_NULL_HANDLE && fs3 != fs1 && g_fetch_allocs == 2 && fcb.nsets == 2);
++    free(fcb.sets);
++    return 0;
++}
++'''
++        with tempfile.TemporaryDirectory() as tmp:
++            path = pathlib.Path(tmp)
++            (path / 'test_p1_vk.c').write_text(c_harness)
++            subprocess.run(['clang', '-std=c11', '-Wall', '-Wextra', '-Werror',
++                            '-pthread', '-fsanitize=address,undefined',
++                            str(path / 'test_p1_vk.c'), '-o', str(path / 'test_p1_vk')],
++                           check=True)
++            subprocess.run([str(path / 'test_p1_vk')], check=True)
++
++
++if __name__ == '__main__':
++    unittest.main()

@@ -28,7 +28,7 @@ Minisforum UM790 Pro Hackintosh 专项性能优化合集，聚焦 **AMD Zen 4 �
     - `-um790cppcoff`：仅禁用 CPPC 写入，保留风扇控制功能。
 
 ### 2. `patches/nvmtl-um790pro-optimizations.patch`：`NVMTLDriver` Metal→Vulkan 转译与显存调度优化
-基于 NullMoth / `nullarc` (`a209038`) 针对 Radeon 780M APU 与 macOS 桌面合成特征的补丁，覆盖以下 11 项核心改进：
+基于 NullMoth / `nullarc` (`a209038`) 针对 Radeon 780M APU 与 macOS 桌面合成特征的补丁，覆盖以下 12 项核心改进：
 1. **消除 AMD APU `res2` 显存抖动与分配线程卡顿**：
    - 修复独显默认的 `1024 MiB` headroom + `256 MiB` margin（`1356 MiB` target）与 AMD `128 MiB` 软上限冲突引发的 DDR5↔DDR5 纹理频繁迁出/迁回（此前 10 分钟内高达 30.8 GB 搬运与 16–30 ms 主线程阻塞）。
    - AMD (`0x1002`) 下默认关闭 `res2` LRU 页面搬运（保留 `res1` purgeable 显存回收，可用 `NVMTL_NO_RES2=0` 随时手动开启）；将 `WindowServer` 默认 `nvmtl_amd_vram_cap()` 提升至 `256 MiB`（其他进程维持 `128 MiB`），`headroom` 按容量自适应为 `8–32 MiB`。
@@ -62,7 +62,11 @@ Minisforum UM790 Pro Hackintosh 专项性能优化合集，聚焦 **AMD Zen 4 �
 11. **消除桌面过渡动画卡顿、修复 `radv_destroy_cmd_buffer + 879` 崩溃与登录界面残缺**：
     - **`(VkCommandPool, VkCommandBuffer)` 配对原位重置复用**：在 `nvmtl_cmd_retire()` 中改用 `vkResetCommandPool(g_dev, pool, 0)` 并连同 `VkCommandBuffer` 一并缓存于 `g_keep_pool`（AMD 进程上限 `32` 组），消除每次提交频繁 `vkFreeCommandBuffers` / `vkAllocateCommandBuffers` 引发的 GTT CS BO 震荡、`PhxBringup::waitIdle()` 阻塞与 RADV `_radv_create_cmd_stream` 失败时 `_radv_destroy_cmd_buffer + 879` 空指针崩溃（`SIGSEGV at 0x8`）。
     - **新增 `g_ipark` 2D 纹理复用池与扩大 `WindowServer` Surface 缓存**：在 `nvmtl_vk.c` 新增 `g_ipark`（最多 `64` 张 / `64 MiB`、`16 MiB` 以下 2D 彩色纹理解构不立即释放，下次同规格直接零内核开销复用，`NVMTL_NO_IMGREUSE=1` 可关）；并在 `NVMTLDevice.m` 将 `WindowServer` 宿主 `IOSurface` 缓存放宽至 `192 条目 / 512 MiB / 4000 ms TTL`，大幅削减动画期间高频临时渲染目标重建造成的 `waitIdle()` 主线程卡顿。
-    - **恢复登录界面进程 Framebuffer Fetch**：在 `nvmtl_fbfetch_on()` 中为 `SecurityAgent`、`loginwindow`、`LockScreen`、`efilogin-helper` 保留开启状态，修复登录界面的 `[[color(n)]]` 混合读取回退为哑图像导致的下半部灰色未渲染问题。
+    - **恢复登录界面进程 Framebuffer Fetch**：在 `nvmtl_fbfetch_on()` 中为 `SecurityAgent`、`loginwindow`、`LockScreen`、`efilogin-helper` 保留开启状态，修复登录界面的 `[[color(n)]]` 混合读取回退问题。
+12. **修复锁屏/登录界面黑色时钟（`WindowServer` 启用 AMD Framebuffer Fetch + 每 Pass 输入附件描述符缓存）**：
+    - **`WindowServer` 在 AMD (`0x1002`) 下默认启用 Framebuffer Fetch**：`WindowServer` 合成锁屏时钟等 Liquid Glass / CoreAnimation `fixed_frag_lpf_cpf` 管线会读取 `[[color(0)]]`（`set 3, binding 192`），此前关闭时 `nvmtl_fetch_zero_set()` 将 `dest_0` 绑定为 `(0,0,0,1)` 纯黑哑图像导致时钟发黑。现通过 `nvmtl_fbfetch_decide()` 为 AMD `WindowServer` 默认开启（支持 `NVMTL_FBFETCH_WS=0` 或 `NVMTL_NO_FBFETCH=1` 关闭），普通 AMD 应用仍保持默认关闭（`NVMTL_FBFETCH=1` 按需开启）。
+    - **按 RenderPass 缓存 `c->fetch_set`**：在 `nvk_cmdbuf` 新增 `fetch_set`，同一 RenderPass 内首次带 `fetch_mask` 的绘制分配并写入 `NVMTL_NCOL` 个 `INPUT_ATTACHMENT` 绑定后缓存，后续绘制直接复用，免去重复锁、池分配与 `vkUpdateDescriptorSets`，并在 Begin/End RenderPass 时重置。
+    - **`nvmtl_spirv_bands_ok()` 与 `buffer_alias` 用法对齐**：启用 `nvmtl_fbfetch_on()` 时在描述符 band 检查中跳过 `DescriptorSet 3` (`NVMTL_FETCH_SET`)；并在 `nvmtl_vk_image_create_buffer_alias()` 补充 `VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT` 对齐与去重。
 
 ### 3. `um790-bench/`：零重启稳定性、CPU 与 Metal→Vulkan 压测审计套件
 - 原生 Metal/CPU 压测核心 [`src/metal_stress.m`](um790-bench/src/metal_stress.m) + 编排 CLI [`um790bench.py`](um790-bench/um790bench.py)。
@@ -106,7 +110,7 @@ Minisforum UM790 Pro Hackintosh 专项性能优化合集，聚焦 **AMD Zen 4 �
 | **单项：`NVMTL_RP_LIGHT=1`** (`150` 帧) | `NVMTL_RP_LIGHT=0` | `NVMTL_RP_LIGHT=1` | **`169.0 → 173.9 FPS (+2.9%)` \| P50 `5.143 → 4.814 ms (-6.4%)` \| Encode P50 `-14.7%`** |
 | **单项：`surface-in prologue` (`1920×1080 bpr=1920`)** (`120` 帧) | `NVMTL_SURFIN_PROLOGUE=0` | 默认开启 | **`2707.6 → 3533.1 FPS (+30.5%)` \| Enc P50 `0.211 → 0.095 ms (-55.0%)` \| Tot P95 `1.586 → 0.454 ms (-71.4%)`** |
 
-> 最新完整新默认综合基准（`20261127-210655-after-ws-anim-fix`）：`Composite 264.7 FPS`（`<8.33ms` 达标率 **`99.2%`**，`Enc P50/P95 0.398/0.977 ms`，`Tot P50/P95 3.480/4.580 ms`，`CPU 36.0%`），`VRAM Stress 320 MiB + 24 管线 263.9 ms`，`hang_kills / gpu_timeouts / iop_fail / new_crashes / -1000158000 / alloc_refused / FAILED` 全部为 **`0`**（前序版本 `20261126-221502-after-chrome-opt`：`Composite 233.2 FPS`，`20261126-214139-after-ws-opt2`：`Composite 237.5 FPS`）。
+> 最新完整新默认综合基准（`20261127-214325-after-login-ws-fbfetch`）：`Composite 226.9 FPS`（`<8.33ms` 达标率 **`98.3%`**，`Enc P50/P95 0.420/0.801 ms`，`Tot P50/P95 3.778/5.735 ms`，`CPU 29.3%`），`VRAM Stress 320 MiB + 24 管线 296.9 ms`，`hang_kills / gpu_timeouts / iop_fail / new_crashes / -1000158000 / alloc_refused / FAILED` 全部为 **`0`**；`FBFETCH` 开关隔离 A/B 对比（`120` 帧，`NVMTL_NO_FBFETCH=1` vs `NVMTL_FBFETCH=1`）：`Encode P50 +5.7%`（`0.366 → 0.387 ms`），`Encode P95 -1.5%`（`0.798 → 0.786 ms`），`Avg FPS 260.1 → 202.1`，`CPU 32.4% → 28.4%`（`WindowServer` 仅在使用 `[[color(n)]]` 的 Pass 触发）。前序版本：`20261127-210655-after-ws-anim-fix`（`264.7 FPS`）、`20261126-221502-after-chrome-opt`（`233.2 FPS`）、`20261126-214139-after-ws-opt2`（`237.5 FPS`）。
 
 ### `WindowServer` / `NVMTLDriver` 运行日志改善
 - `-1000158000` 线性缓冲纹理创建报错：`98,304 → 0`
