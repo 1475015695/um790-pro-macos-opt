@@ -1,0 +1,158 @@
+{
+  "timestamp": "20261127-210655",
+  "tag": "after-ws-anim-fix",
+  "bench": {
+    "device": "AMD Radeon 780M Graphics (RADV PHOENIX) (NVMTL over AMD Radeon 780M Graphics (RADV PHOENIX))",
+    "ok": true,
+    "cpu": {
+      "score_1t": 424.26,
+      "score_8t": 3464.34,
+      "score_16t": 5798.74,
+      "smt_scaling": 13.67,
+      "throttle_ratio_16t": 0.987,
+      "memcpy_gbs": 21.33
+    },
+    "composite": {
+      "ok": true,
+      "frames": 240,
+      "wall_ms": 919.7,
+      "encode_p50_ms": 0.398,
+      "encode_p95_ms": 0.977,
+      "encode_p99_ms": 1.317,
+      "encode_max_ms": 33.375,
+      "total_p50_ms": 3.48,
+      "total_p95_ms": 4.58,
+      "total_p99_ms": 5.351,
+      "total_max_ms": 36.522,
+      "avg_fps": 264.7,
+      "pct_under_833ms": 99.2,
+      "cpu_pct": 36.0,
+      "error": ""
+    },
+    "vram_stress": {
+      "ok": true,
+      "target_mb": 320,
+      "textures_held": 20,
+      "iters": 30,
+      "pipelines_compiled": 24,
+      "wall_ms": 263.95,
+      "error": ""
+    }
+  },
+  "log_audit": {
+    "lines": 297,
+    "vk_create_image_err": 0,
+    "vk_alloc_refused": 0,
+    "soft_vram_gate": 0,
+    "failed": 0,
+    "refused": 0
+  },
+  "sysctl_delta": {
+    "debug.phx_hang_kills": 0,
+    "debug.nvaccel_surface_gpu_timeouts": 0,
+    "debug.nvaccel_iop_fail": 0,
+    "debug.nvaccel_iop_ok": 1241,
+    "debug.nvaccel_iop_gap1": 1189,
+    "debug.nvaccel_iop_gap2": 48,
+    "debug.nvaccel_iop_gap3": 3,
+    "debug.nvaccel_iop_gap4": 0,
+    "debug.nvaccel_iop_copy_us": 319,
+    "debug.nvaccel_iop_copy_us_max": 0,
+    "debug.phxfb_vbl_late_us_max": 0,
+    "debug.phxfb_dbuf_flips": 1240,
+    "debug.phxfb_dbuf_wait": 0
+  },
+  "fan_pre": {
+    "abi_version": 1,
+    "admitted": true,
+    "profile": "Balance",
+    "preset": "silent",
+    "read_failures": 0,
+    "admit_error": "",
+    "pnp": [
+      85,
+      113,
+      2
+    ],
+    "sys_ec": {
+      "effective": 56,
+      "override": 0,
+      "target": 20
+    },
+    "fans": [
+      {
+        "name": "cpu",
+        "temp_c": 74,
+        "rpm": 3143,
+        "mode": "curve",
+        "owned": false,
+        "cur_rpm": -1,
+        "manual_rpm": 1800,
+        "duty": 46,
+        "hot": false,
+        "holding": false,
+        "hunts": 0
+      },
+      {
+        "name": "system",
+        "temp_c": 56,
+        "rpm": 2055,
+        "mode": "curve",
+        "owned": false,
+        "cur_rpm": -1,
+        "manual_rpm": 1600,
+        "duty": 62,
+        "hot": true,
+        "holding": false,
+        "hunts": 0
+      }
+    ]
+  },
+  "fan_post": {
+    "abi_version": 1,
+    "admitted": true,
+    "profile": "Balance",
+    "preset": "silent",
+    "read_failures": 0,
+    "admit_error": "",
+    "pnp": [
+      85,
+      113,
+      2
+    ],
+    "sys_ec": {
+      "effective": 56,
+      "override": 0,
+      "target": 20
+    },
+    "fans": [
+      {
+        "name": "cpu",
+        "temp_c": 72,
+        "rpm": 3143,
+        "mode": "curve",
+        "owned": false,
+        "cur_rpm": -1,
+        "manual_rpm": 1800,
+        "duty": 46,
+        "hot": false,
+        "holding": false,
+        "hunts": 0
+      },
+      {
+        "name": "system",
+        "temp_c": 56,
+        "rpm": 2055,
+        "mode": "curve",
+        "owned": false,
+        "cur_rpm": -1,
+        "manual_rpm": 1600,
+        "duty": 62,
+        "hot": true,
+        "holding": false,
+        "hunts": 0
+      }
+    ]
+  },
+  "new_crashes": []
+}
